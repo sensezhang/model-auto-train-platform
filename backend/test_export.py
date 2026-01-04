@@ -56,7 +56,7 @@ def test_export(project_id: int):
         print("=" * 50)
         for split in ['train', 'val', 'test']:
             split_dir = os.path.join(output_dir, split)
-            ann_file = os.path.join(split_dir, '_annotations.json')
+            ann_file = os.path.join(split_dir, '_annotations.coco.json')
 
             if os.path.exists(ann_file):
                 with open(ann_file, 'r', encoding='utf-8') as f:

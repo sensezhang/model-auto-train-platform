@@ -39,6 +39,14 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
 }) => {
   const [augConfig, setAugConfig] = useState<AugmentationConfig>(defaultAugConfig)
   const [exporting, setExporting] = useState(false)
+  const [localExporting, setLocalExporting] = useState(false)
+  const [localResult, setLocalResult] = useState<{
+    success: boolean
+    path: string
+    filename: string
+    size_human: string
+    total_images: number
+  } | null>(null)
   const [seed, setSeed] = useState(42)
   const [format, setFormat] = useState<'coco' | 'yolo'>('yolo')
 
@@ -56,18 +64,57 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
     })
   }
 
-  const handleExport = async () => {
-    setExporting(true)
-    onExportStart()
+  const handleLocalExport = async () => {
+    setLocalExporting(true)
+    setLocalResult(null)
 
     try {
+      // 如果启用了数据增强或调整图片尺寸，发送 augmentation 配置
+      const shouldSendAugmentation = augConfig.enabled || augConfig.resize.enabled
       const body = {
         format,
         seed,
         train_ratio: 0.8,
         val_ratio: 0.1,
         test_ratio: 0.1,
-        augmentation: augConfig.enabled ? augConfig : null
+        augmentation: shouldSendAugmentation ? augConfig : null
+      }
+
+      const res = await fetch(`/api/projects/${projectId}/export/local`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+
+      if (!res.ok) {
+        const errorText = await res.text()
+        throw new Error(errorText || '导出失败')
+      }
+
+      const result = await res.json()
+      setLocalResult(result)
+    } catch (e) {
+      console.error(e)
+      onExportEnd(false, '生成本地压缩包失败：' + (e as Error).message)
+    } finally {
+      setLocalExporting(false)
+    }
+  }
+
+  const handleExport = async () => {
+    setExporting(true)
+    onExportStart()
+
+    try {
+      // 如果启用了数据增强或调整图片尺寸，发送 augmentation 配置
+      const shouldSendAugmentation = augConfig.enabled || augConfig.resize.enabled
+      const body = {
+        format,
+        seed,
+        train_ratio: 0.8,
+        val_ratio: 0.1,
+        test_ratio: 0.1,
+        augmentation: shouldSendAugmentation ? augConfig : null
       }
 
       const res = await fetch(`/api/projects/${projectId}/export/download`, {
@@ -474,34 +521,67 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
           )}
         </div>
 
+        {/* 本地导出结果显示 */}
+        {localResult && (
+          <div style={{
+            padding: 12,
+            backgroundColor: '#f6ffed',
+            border: '1px solid #b7eb8f',
+            borderRadius: 6,
+            marginBottom: 16
+          }}>
+            <div style={{ color: '#52c41a', fontWeight: 500, marginBottom: 8 }}>✓ 压缩包已生成</div>
+            <div style={{ fontSize: 13, color: '#333' }}>
+              <div style={{ marginBottom: 4 }}><strong>文件名：</strong>{localResult.filename}</div>
+              <div style={{ marginBottom: 4 }}><strong>大小：</strong>{localResult.size_human}</div>
+              <div style={{ marginBottom: 4 }}><strong>图片数：</strong>{localResult.total_images}</div>
+              <div style={{ wordBreak: 'break-all' }}><strong>路径：</strong><code style={{ backgroundColor: '#f5f5f5', padding: '2px 6px', borderRadius: 3 }}>{localResult.path}</code></div>
+            </div>
+          </div>
+        )}
+
         {/* 按钮 */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
           <button
             onClick={onClose}
-            disabled={exporting}
+            disabled={exporting || localExporting}
             style={{
               padding: '8px 16px',
               border: '1px solid #d9d9d9',
               borderRadius: 4,
               backgroundColor: 'white',
-              cursor: exporting ? 'not-allowed' : 'pointer'
+              cursor: (exporting || localExporting) ? 'not-allowed' : 'pointer'
             }}
           >
             取消
           </button>
           <button
+            onClick={handleLocalExport}
+            disabled={exporting || localExporting}
+            style={{
+              padding: '8px 16px',
+              border: '1px solid #1890ff',
+              borderRadius: 4,
+              backgroundColor: 'white',
+              color: '#1890ff',
+              cursor: (exporting || localExporting) ? 'not-allowed' : 'pointer'
+            }}
+          >
+            {localExporting ? '生成中...' : '生成服务器压缩包'}
+          </button>
+          <button
             onClick={handleExport}
-            disabled={exporting}
+            disabled={exporting || localExporting}
             style={{
               padding: '8px 16px',
               border: 'none',
               borderRadius: 4,
               backgroundColor: '#52c41a',
               color: 'white',
-              cursor: exporting ? 'not-allowed' : 'pointer'
+              cursor: (exporting || localExporting) ? 'not-allowed' : 'pointer'
             }}
           >
-            {exporting ? '导出中...' : '导出'}
+            {exporting ? '下载中...' : '下载到本地'}
           </button>
         </div>
       </div>

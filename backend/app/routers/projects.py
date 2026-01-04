@@ -21,9 +21,10 @@ from ..models import (
     ActivityLog,
     ImportJob,
 )
-from ..utils.files import extract_images_from_zip, import_single_image
+from ..utils.files import extract_images_from_zip, import_single_image, import_image_from_base64, generate_thumbnail_and_display
 from ..utils.project_cleanup import remove_project_files
 from ..services.import_yolo import import_yolo_dataset
+from ..services.import_coco import import_coco_dataset
 
 
 router = APIRouter(tags=["projects"])
@@ -127,6 +128,32 @@ async def import_image(project_id: int, file: UploadFile = File(...)):
     return SingleImageImportResult(**result)
 
 
+class Base64ImageImport(BaseModel):
+    filename: str
+    data: str  # Base64 编码的图片数据
+
+
+@router.post("/projects/{project_id}/import/image-base64", response_model=SingleImageImportResult)
+def import_image_base64(project_id: int, body: Base64ImageImport):
+    """
+    导入单张图片（Base64 JSON 格式，避免 multipart/form-data）
+
+    前端使用 FileReader.readAsDataURL() 获取 Base64 数据
+    """
+    with get_session() as session:
+        proj = session.get(Project, project_id)
+        if not proj:
+            raise HTTPException(404, "Project not found")
+
+    # 移除可能的 data URL 前缀 (data:image/jpeg;base64,)
+    base64_data = body.data
+    if "," in base64_data:
+        base64_data = base64_data.split(",", 1)[1]
+
+    result = import_image_from_base64(project_id, body.filename, base64_data)
+    return SingleImageImportResult(**result)
+
+
 @router.post("/projects/{project_id}/import/yolo")
 async def import_yolo_zip(
     project_id: int,
@@ -184,6 +211,85 @@ async def import_yolo_zip(
         project_id,
         temp_file.name,
         import_annotations
+    )
+
+    return {"job_id": job_id, "status": "pending", "message": "导入任务已创建"}
+
+
+@router.post("/projects/{project_id}/import/coco")
+async def import_coco_zip(
+    project_id: int,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...)
+):
+    """
+    导入COCO格式数据集zip包（异步，返回任务ID）
+
+    支持的结构:
+    - train/_annotations.coco.json + images
+    - valid/_annotations.coco.json + images (可选)
+    - test/_annotations.coco.json + images (可选)
+
+    类别映射规则:
+    - 根据COCO JSON中的categories与项目类别名称进行匹配
+    - 如果项目中不存在某个类别，会自动创建
+    """
+    print(f"[COCO Import] Received file: {file.filename}, content_type: {file.content_type}")
+
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(400, "Please upload a .zip file")
+
+    with get_session() as session:
+        proj = session.get(Project, project_id)
+        if not proj:
+            raise HTTPException(404, "Project not found")
+
+        # 创建导入任务
+        import_job = ImportJob(
+            projectId=project_id,
+            format="coco",
+            status="pending",
+            message="准备导入..."
+        )
+        session.add(import_job)
+        session.commit()
+        session.refresh(import_job)
+        job_id = import_job.id
+        print(f"[COCO Import] Created job {job_id} for project {project_id}")
+
+    # 保存上传文件到临时位置（流式写入，支持大文件）
+    temp_dir = tempfile.mkdtemp()
+    temp_file_path = os.path.join(temp_dir, "upload.zip")
+
+    try:
+        print(f"[COCO Import] Saving file to {temp_file_path}")
+        # 使用流式写入，每次读取 8MB
+        chunk_size = 8 * 1024 * 1024  # 8MB chunks
+        total_size = 0
+
+        with open(temp_file_path, "wb") as f:
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                total_size += len(chunk)
+
+        print(f"[COCO Import] File saved, total size: {total_size / 1024 / 1024:.2f} MB")
+
+    except Exception as e:
+        print(f"[COCO Import] Failed to save file: {e}")
+        import traceback
+        traceback.print_exc()
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(500, f"Failed to save uploaded file: {e}")
+
+    # 在后台运行导入任务
+    background_tasks.add_task(
+        run_coco_import_sync,
+        job_id,
+        project_id,
+        temp_file_path
     )
 
     return {"job_id": job_id, "status": "pending", "message": "导入任务已创建"}
@@ -290,6 +396,95 @@ async def run_yolo_import(job_id: int, project_id: int, temp_file_path: str, imp
             pass
 
 
+def run_coco_import_sync(job_id: int, project_id: int, temp_file_path: str):
+    """后台运行COCO导入任务（同步包装器）"""
+    import asyncio
+    try:
+        # 创建新的事件循环
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(
+            run_coco_import(job_id, project_id, temp_file_path)
+        )
+    finally:
+        loop.close()
+
+
+async def run_coco_import(job_id: int, project_id: int, temp_file_path: str):
+    """后台运行COCO导入任务"""
+    import traceback
+    try:
+        print(f"[COCO Import Job {job_id}] Starting import for project {project_id}")
+
+        # 更新任务状态为运行中
+        with get_session() as session:
+            job = session.get(ImportJob, job_id)
+            if job:
+                job.status = "running"
+                job.startedAt = datetime.utcnow()
+                job.message = "正在解析COCO数据..."
+                session.commit()
+                print(f"[COCO Import Job {job_id}] Status updated to running")
+
+        # 创建进度回调
+        def progress_callback(current: int, total: int, message: str):
+            try:
+                with get_session() as session:
+                    job = session.get(ImportJob, job_id)
+                    if job:
+                        job.current = current
+                        job.total = total
+                        job.message = message
+                        session.commit()
+            except Exception as e:
+                print(f"[COCO Import Job {job_id}] Progress callback error: {e}")
+
+        # 执行导入
+        print(f"[COCO Import Job {job_id}] Calling import_coco_dataset")
+        result = import_coco_dataset(
+            project_id,
+            temp_file_path,
+            progress_callback
+        )
+        print(f"[COCO Import Job {job_id}] Import completed: {result}")
+
+        # 更新任务状态为完成
+        with get_session() as session:
+            job = session.get(ImportJob, job_id)
+            if job:
+                job.status = "succeeded"
+                job.finishedAt = datetime.utcnow()
+                job.total = result.get("total_images", 0)
+                job.current = result.get("total_images", 0)
+                job.imported = result.get("imported_images", 0)
+                job.duplicates = result.get("duplicate_images", 0)
+                job.errors = result.get("error_images", 0)
+                job.annotations_imported = result.get("imported_annotations", 0)
+                job.annotations_skipped = result.get("skipped_annotations", 0)
+                job.message = "导入完成"
+                session.commit()
+                print(f"[COCO Import Job {job_id}] Status updated to succeeded")
+
+    except Exception as e:
+        # 更新任务状态为失败
+        print(f"[COCO Import Job {job_id}] Error: {e}")
+        traceback.print_exc()
+        with get_session() as session:
+            job = session.get(ImportJob, job_id)
+            if job:
+                job.status = "failed"
+                job.finishedAt = datetime.utcnow()
+                job.message = f"导入失败: {str(e)}"
+                session.commit()
+    finally:
+        # 清理临时文件
+        try:
+            os.unlink(temp_file_path)
+            print(f"[COCO Import Job {job_id}] Temp file cleaned up")
+        except Exception:
+            pass
+
+
 @router.get("/projects/{project_id}/import/jobs/{job_id}")
 def get_import_job(project_id: int, job_id: int):
     """获取导入任务状态和进度"""
@@ -311,6 +506,114 @@ def get_import_job(project_id: int, job_id: int):
             "annotations_skipped": job.annotations_skipped,
             "message": job.message,
             "progress": round(job.current / job.total * 100, 1) if job.total > 0 else 0
+        }
+
+
+@router.post("/projects/{project_id}/generate-thumbnails")
+def generate_thumbnails(project_id: int, background_tasks: BackgroundTasks):
+    """
+    为项目中没有缩略图的图片批量生成缩略图和标注用图
+    """
+    with get_session() as session:
+        proj = session.get(Project, project_id)
+        if not proj:
+            raise HTTPException(404, "Project not found")
+
+        # 查找没有缩略图的图片数量
+        images_without_thumb = (
+            session.query(Image)
+            .filter(Image.projectId == project_id)
+            .filter((Image.thumbnailPath == None) | (Image.thumbnailPath == ""))
+            .count()
+        )
+
+    if images_without_thumb == 0:
+        return {"message": "所有图片都已有缩略图", "total": 0, "status": "completed"}
+
+    # 在后台执行生成任务
+    background_tasks.add_task(run_generate_thumbnails, project_id)
+
+    return {
+        "message": f"开始为 {images_without_thumb} 张图片生成缩略图",
+        "total": images_without_thumb,
+        "status": "started"
+    }
+
+
+def run_generate_thumbnails(project_id: int):
+    """后台任务：为项目图片生成缩略图"""
+    import os
+
+    with get_session() as session:
+        images = (
+            session.query(Image)
+            .filter(Image.projectId == project_id)
+            .filter((Image.thumbnailPath == None) | (Image.thumbnailPath == ""))
+            .all()
+        )
+
+        total = len(images)
+        success = 0
+        failed = 0
+
+        for i, img in enumerate(images):
+            try:
+                original_path = os.path.join(os.getcwd(), img.path)
+                if not os.path.exists(original_path):
+                    print(f"[Thumbnail] 文件不存在: {original_path}")
+                    failed += 1
+                    continue
+
+                filename = os.path.basename(img.path)
+                thumb_filename = os.path.splitext(filename)[0] + ".jpg"
+
+                thumb_path, display_path = generate_thumbnail_and_display(
+                    original_path, project_id, thumb_filename
+                )
+
+                if thumb_path and display_path:
+                    img.thumbnailPath = thumb_path
+                    img.displayPath = display_path
+                    session.add(img)
+                    success += 1
+                else:
+                    failed += 1
+
+                # 每处理 10 张提交一次
+                if (i + 1) % 10 == 0:
+                    session.commit()
+                    print(f"[Thumbnail] 进度: {i + 1}/{total}")
+
+            except Exception as e:
+                print(f"[Thumbnail] 生成失败: {img.path}, 错误: {e}")
+                failed += 1
+
+        session.commit()
+        print(f"[Thumbnail] 完成: 成功 {success}, 失败 {failed}, 总计 {total}")
+
+
+@router.get("/projects/{project_id}/thumbnail-status")
+def get_thumbnail_status(project_id: int):
+    """获取项目缩略图生成状态"""
+    with get_session() as session:
+        proj = session.get(Project, project_id)
+        if not proj:
+            raise HTTPException(404, "Project not found")
+
+        total = session.query(Image).filter(Image.projectId == project_id).count()
+        with_thumbnail = (
+            session.query(Image)
+            .filter(Image.projectId == project_id)
+            .filter(Image.thumbnailPath != None)
+            .filter(Image.thumbnailPath != "")
+            .count()
+        )
+
+        return {
+            "total": total,
+            "with_thumbnail": with_thumbnail,
+            "without_thumbnail": total - with_thumbnail,
+            "progress": round(with_thumbnail / total * 100, 1) if total > 0 else 100
         }
 
 

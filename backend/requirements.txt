@@ -6,3 +6,15 @@ python-multipart==0.0.9
 Jinja2==3.1.4
 Pillow==10.4.0
 ultralytics>=8.2.0
+# ONNX 导出依赖（版本锁定，避免冲突）
+onnx==1.17.0
+onnxsim>=0.4.0
+onnx_graphsurgeon==0.5.2
+# PyTorch with CUDA 11.8 support
+# Install with: pip install torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cu118
+torch==2.0.1
+torchvision==0.15.2
+numpy<2.0
+opencv-python<4.10
+transformers>=4.40,<4.50
+peft>=0.10,<0.12

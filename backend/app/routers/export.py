@@ -104,9 +104,9 @@ def export_dataset_info(project_id: int, body: ExportRequest):
     if abs(body.train_ratio + body.val_ratio + body.test_ratio - 1.0) > 0.01:
         raise HTTPException(400, "Train, val, and test ratios must sum to 1.0")
 
-    # 解析增强配置
+    # 解析增强配置（包括 resize，resize 独立于数据增强开关）
     aug_config = None
-    if body.augmentation and body.augmentation.enabled:
+    if body.augmentation:
         aug_config = _parse_augmentation_request(body.augmentation)
 
     try:
@@ -140,6 +140,115 @@ def export_dataset_info(project_id: int, body: ExportRequest):
         raise HTTPException(500, f"Export failed: {e}")
 
 
+@router.post("/projects/{project_id}/export/local")
+def export_dataset_local(
+    project_id: int,
+    body: ExportRequest
+):
+    """
+    导出数据集到服务器本地目录（不下载）
+
+    Args:
+        project_id: 项目ID
+        body: 导出配置（包含增强选项）
+
+    Returns:
+        生成的压缩包路径信息
+    """
+    if body.format not in ["coco", "yolo"]:
+        raise HTTPException(400, "Format must be 'coco' or 'yolo'")
+
+    # 验证比例
+    if abs(body.train_ratio + body.val_ratio + body.test_ratio - 1.0) > 0.01:
+        raise HTTPException(400, "Train, val, and test ratios must sum to 1.0")
+
+    # 解析增强配置（包括 resize，resize 独立于数据增强开关）
+    aug_config = None
+    if body.augmentation:
+        aug_config = _parse_augmentation_request(body.augmentation)
+
+    try:
+        # 确保 backend/data 目录存在
+        backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        data_dir = os.path.join(backend_dir, "data")
+        os.makedirs(data_dir, exist_ok=True)
+
+        # 创建临时目录用于导出
+        tmp_dir = tempfile.mkdtemp()
+        export_dir = os.path.join(tmp_dir, "export")
+
+        # 根据格式导出数据集
+        if body.format == "yolo":
+            result = export_dataset_to_yolo(
+                project_id=project_id,
+                output_dir=export_dir,
+                seed=body.seed,
+                train_ratio=body.train_ratio,
+                val_ratio=body.val_ratio,
+                test_ratio=body.test_ratio,
+                augmentation_config=aug_config
+            )
+        else:
+            result = export_dataset_to_coco(
+                project_id=project_id,
+                output_dir=export_dir,
+                seed=body.seed,
+                train_ratio=body.train_ratio,
+                val_ratio=body.val_ratio,
+                test_ratio=body.test_ratio,
+                augmentation_config=aug_config
+            )
+
+        # 创建ZIP文件名
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_project_name = re.sub(r'[^\w\u4e00-\u9fff-]', '_', result['project_name'])
+        safe_project_name = re.sub(r'_+', '_', safe_project_name).strip('_')
+        aug_suffix = "_aug" if result.get('augmentation_enabled') else ""
+        zip_filename = f"{safe_project_name}_{body.format}{aug_suffix}_{timestamp}.zip"
+        zip_path = os.path.join(data_dir, zip_filename)
+
+        # 创建ZIP文件
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(export_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, export_dir)
+                    zipf.write(file_path, arcname)
+
+        # 清理临时目录
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        # 获取文件大小
+        file_size = os.path.getsize(zip_path)
+
+        return {
+            "success": True,
+            "path": zip_path,
+            "filename": zip_filename,
+            "size": file_size,
+            "size_human": _format_file_size(file_size),
+            "project_name": result['project_name'],
+            "format": body.format,
+            "total_images": result['total_images'],
+            "augmentation_enabled": result.get('augmentation_enabled', False)
+        }
+
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Export failed: {e}")
+
+
+def _format_file_size(size_bytes: int) -> str:
+    """将字节数转换为人类可读的格式"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} TB"
+
+
 @router.post("/projects/{project_id}/export/download")
 def download_dataset_post(
     project_id: int,
@@ -162,9 +271,9 @@ def download_dataset_post(
     if abs(body.train_ratio + body.val_ratio + body.test_ratio - 1.0) > 0.01:
         raise HTTPException(400, "Train, val, and test ratios must sum to 1.0")
 
-    # 解析增强配置
+    # 解析增强配置（包括 resize，resize 独立于数据增强开关）
     aug_config = None
-    if body.augmentation and body.augmentation.enabled:
+    if body.augmentation:
         aug_config = _parse_augmentation_request(body.augmentation)
 
     try:
@@ -309,6 +418,14 @@ def _parse_augmentation_request(aug_req: AugmentationRequest) -> AugmentationCon
     config = AugmentationConfig()
     config.enabled = aug_req.enabled
 
+    # Resize 是独立于数据增强开关的，始终解析
+    if aug_req.resize and aug_req.resize.enabled:
+        config.resize_enabled = True
+        config.resize_width = aug_req.resize.width
+        config.resize_height = aug_req.resize.height
+        config.resize_keep_aspect = aug_req.resize.keepAspect
+
+    # 如果数据增强未启用，只返回 resize 配置
     if not config.enabled:
         return config
 
@@ -337,13 +454,6 @@ def _parse_augmentation_request(aug_req: AugmentationRequest) -> AugmentationCon
     if aug_req.blur and aug_req.blur.enabled:
         config.blur_enabled = True
         config.blur_radius = aug_req.blur.radius
-
-    # Resize
-    if aug_req.resize and aug_req.resize.enabled:
-        config.resize_enabled = True
-        config.resize_width = aug_req.resize.width
-        config.resize_height = aug_req.resize.height
-        config.resize_keep_aspect = aug_req.resize.keepAspect
 
     # 增强倍数
     config.augment_count = aug_req.count

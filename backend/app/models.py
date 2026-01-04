@@ -33,7 +33,9 @@ class ImageStatus(str, Enum):
 class Image(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     projectId: int = Field(foreign_key="project.id")
-    path: str
+    path: str  # 原图路径
+    thumbnailPath: Optional[str] = None  # 缩略图路径 (200px)
+    displayPath: Optional[str] = None    # 标注用图路径 (1920px)
     width: Optional[int] = None
     height: Optional[int] = None
     checksum: Optional[str] = None
@@ -105,11 +107,13 @@ class TrainingJob(SQLModel, table=True):
     projectId: int = Field(foreign_key="project.id")
     datasetVersionId: Optional[int] = Field(default=None, foreign_key="datasetversion.id")
     status: JobStatus = Field(default="pending")
+    framework: str = Field(default="yolo")  # yolo | rfdetr
     modelVariant: str = Field(default="yolov11n")
     epochs: int = Field(default=50)
     imgsz: int = Field(default=640)
     batch: Optional[int] = None
     seed: int = Field(default=42)
+    gpuIds: Optional[str] = None  # 逗号分隔的GPU ID列表，如 "0,1,2"
     logsRef: Optional[str] = None
     map50: Optional[float] = None
     map50_95: Optional[float] = None

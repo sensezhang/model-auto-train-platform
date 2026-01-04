@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .routers import projects, images, annotations, autolabel, training, export
+from .routers import projects, images, annotations, autolabel, training, export, system
 
 
 def create_app() -> FastAPI:
@@ -22,6 +22,7 @@ def create_app() -> FastAPI:
     app.include_router(autolabel.router, prefix="/api")
     app.include_router(training.router, prefix="/api")
     app.include_router(export.router, prefix="/api")
+    app.include_router(system.router, prefix="/api")
 
     @app.get("/api/health")
     def health():

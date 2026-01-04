@@ -1,7 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CanvasBBox, BBox, getClassColor } from '../components/CanvasBBox'
 
-type ImageItem = { id: number; path: string; width: number; height: number; status: 'unannotated'|'ai_pending'|'annotated' }
+type ImageItem = {
+  id: number;
+  path: string;
+  thumbnailPath?: string;
+  displayPath?: string;
+  width: number;
+  height: number;
+  status: 'unannotated'|'ai_pending'|'annotated'
+}
 type ClassItem = { id: number; name: string }
 type Annotation = { id: number; imageId: number; classId: number; x: number; y: number; w: number; h: number; source: 'manual'|'ai' }
 
@@ -21,17 +29,6 @@ export const Annotator: React.FC<{ projectId: number; onBack: () => void }> = ({
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const undoStack = useRef<any[]>([])
   const redoStack = useRef<any[]>([])
-  const [trainBusy, setTrainBusy] = useState(false)
-  const [trainJob, setTrainJob] = useState<any | null>(null)
-  const [artifacts, setArtifacts] = useState<any[]>([])
-  const [logLines, setLogLines] = useState<string[]>([])
-  const [trainParams, setTrainParams] = useState({
-    modelVariant: 'yolo11n',
-    epochs: 50,
-    imgsz: 640,
-    batch: '',
-    seed: 42,
-  })
   const imageListRef = useRef<HTMLUListElement>(null)
 
   // 图片多选和删除相关状态
@@ -165,7 +162,12 @@ export const Annotator: React.FC<{ projectId: number; onBack: () => void }> = ({
     }
   }
 
-  const imageUrl = useMemo(() => current ? `/files/${current.path}` : '', [current])
+  // 优先使用标注用图(displayPath)，其次使用原图(path)
+  const imageUrl = useMemo(() => {
+    if (!current) return ''
+    // 使用标注用图（较小，加载快）或原图
+    return `/files/${current.displayPath || current.path}`
+  }, [current])
 
   const onCreate = async (box: { x: number; y: number; w: number; h: number; classId: number; source?: 'manual'|'ai' }) => {
     if (!current) return
@@ -184,84 +186,6 @@ export const Annotator: React.FC<{ projectId: number; onBack: () => void }> = ({
       setImages(prev => prev.map(img => img.id === current.id ? { ...img, status: 'annotated' } : img))
       setCurrent(prev => prev ? { ...prev, status: 'annotated' } : prev)
     }
-  }
-
-  const startTraining = async () => {
-    if (!confirm('开始训练？需要至少50张已标注图片。')) return
-    setTrainBusy(true)
-    try {
-      // imgsz校验为32的倍数
-      let imgsz = Number(trainParams.imgsz) || 640
-      if (imgsz % 32 !== 0) {
-        const adjusted = Math.max(32, Math.round(imgsz / 32) * 32)
-        alert(`imgsz需为32的倍数，已从${imgsz}调整为${adjusted}`)
-        imgsz = adjusted
-        setTrainParams(p => ({ ...p, imgsz: adjusted }))
-      }
-      const res = await fetch('/api/training/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          projectId,
-          modelVariant: trainParams.modelVariant,
-          epochs: Number(trainParams.epochs) || 50,
-          imgsz,
-          batch: trainParams.batch === '' ? null : Number(trainParams.batch),
-          seed: Number(trainParams.seed) || 42,
-        })
-      })
-      if (!res.ok) {
-        const msg = await res.text()
-        alert('启动训练失败：' + msg)
-        return
-      }
-      const job = await res.json()
-      setTrainJob(job)
-    } finally {
-      setTrainBusy(false)
-    }
-  }
-
-  useEffect(() => {
-    let timer: any
-    if (trainJob?.id) {
-      const poll = async () => {
-        const jr = await fetch(`/api/training/jobs/${trainJob.id}`).then(r => r.json())
-        setTrainJob(jr)
-        if (jr.status === 'succeeded' || jr.status === 'failed' || jr.status === 'canceled') {
-          clearInterval(timer)
-          const arts = await fetch(`/api/training/jobs/${jr.id}/artifacts`).then(r => r.json())
-          setArtifacts(arts)
-        }
-      }
-      timer = setInterval(poll, 3000)
-      poll()
-    }
-    return () => { if (timer) clearInterval(timer) }
-  }, [trainJob?.id])
-
-  // Logs streaming via SSE
-  useEffect(() => {
-    if (!trainJob?.id) return
-    const es = new EventSource(`/api/training/jobs/${trainJob.id}/logs/stream`)
-    es.onmessage = (ev) => {
-      setLogLines(prev => {
-        const next = [...prev, ev.data]
-        // keep last 500 lines
-        if (next.length > 500) next.splice(0, next.length - 500)
-        return next
-      })
-    }
-    es.onerror = () => {
-      es.close()
-    }
-    return () => es.close()
-  }, [trainJob?.id])
-
-  const cancelTraining = async () => {
-    if (!trainJob?.id) return
-    if (!confirm('确定要停止当前训练吗？将会在本轮epoch结束后停止。')) return
-    await fetch(`/api/training/jobs/${trainJob.id}/cancel`, { method: 'POST' })
   }
 
   const onDelete = async (id: number) => {
@@ -359,21 +283,6 @@ export const Annotator: React.FC<{ projectId: number; onBack: () => void }> = ({
             <option value='ai_pending'>AI待审</option>
             <option value='annotated'>已标注</option>
           </select>
-          {!trainJob && (
-            <button onClick={startTraining} disabled={trainBusy} style={{ padding: '6px 10px' }}>
-              {trainBusy ? '启动中...' : '开始训练'}
-            </button>
-          )}
-          {trainJob && trainJob.status === 'running' && (
-            <button onClick={cancelTraining} style={{ padding: '6px 10px', color: '#ff4d4f', borderColor: '#ff4d4f' }}>
-              停止训练
-            </button>
-          )}
-          {trainJob && trainJob.status !== 'running' && (
-            <button onClick={() => { setTrainJob(null); setArtifacts([]); setLogLines([]) }} style={{ padding: '6px 10px' }}>
-              新建训练
-            </button>
-          )}
         </div>
       </header>
       <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr 280px', gap: 12, padding: 12, overflow: 'hidden' }}>
@@ -453,6 +362,20 @@ export const Annotator: React.FC<{ projectId: number; onBack: () => void }> = ({
                     style={{ marginTop: 2 }}
                   />
                 )}
+                {/* 缩略图 */}
+                <img
+                  src={`/files/${img.thumbnailPath || img.path}`}
+                  alt=""
+                  style={{
+                    width: 60,
+                    height: 60,
+                    objectFit: 'cover',
+                    borderRadius: 4,
+                    backgroundColor: '#f0f0f0',
+                    flexShrink: 0
+                  }}
+                  loading="lazy"
+                />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 12, color: '#333', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{img.path.split('/').slice(-1)[0]}</div>
                   <div style={{ fontSize: 11, color: '#999' }}>状态：{img.status}</div>
@@ -534,73 +457,6 @@ export const Annotator: React.FC<{ projectId: number; onBack: () => void }> = ({
               3) Delete 删除，方向键微调（Shift加速），Ctrl+Z 撤销，Ctrl+Shift+Z 重做；
               4) 右侧列表可快速切换类别。
             </div>
-            <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px dashed #eee' }}>
-              <div style={{ fontWeight: 600, marginBottom: 8 }}>训练参数</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                <label style={{ display: 'grid', gap: 4 }}>
-                  <span style={{ fontSize: 12, color: '#666' }}>模型变体</span>
-                  <select
-                    value={trainParams.modelVariant}
-                    onChange={e => setTrainParams(p => ({ ...p, modelVariant: e.target.value }))}
-                  >
-                    <option value="yolo11n">yolo11n（轻量，默认）</option>
-                    <option value="yolo11s">yolo11s（小）</option>
-                    <option value="yolo11m">yolo11m（中）</option>
-                  </select>
-                </label>
-                <label style={{ display: 'grid', gap: 4 }}>
-                  <span style={{ fontSize: 12, color: '#666' }}>epochs</span>
-                  <input type="number" min={1} max={500} value={trainParams.epochs}
-                         onChange={e => setTrainParams(p => ({ ...p, epochs: Number(e.target.value) }))} />
-                </label>
-                <label style={{ display: 'grid', gap: 4 }}>
-                  <span style={{ fontSize: 12, color: '#666' }}>训练输入尺寸 imgsz（32的倍数）</span>
-                  <input type="number" step={32} min={320} max={1536} value={trainParams.imgsz}
-                         onChange={e => setTrainParams(p => ({ ...p, imgsz: Number(e.target.value) }))} />
-                </label>
-                <label style={{ display: 'grid', gap: 4 }}>
-                  <span style={{ fontSize: 12, color: '#666' }}>batch（留空=auto）</span>
-                  <input placeholder="auto" value={trainParams.batch}
-                         onChange={e => setTrainParams(p => ({ ...p, batch: e.target.value }))} />
-                </label>
-                <label style={{ display: 'grid', gap: 4 }}>
-                  <span style={{ fontSize: 12, color: '#666' }}>seed</span>
-                  <input type="number" value={trainParams.seed}
-                         onChange={e => setTrainParams(p => ({ ...p, seed: Number(e.target.value) }))} />
-                </label>
-              </div>
-              <div style={{ marginTop: 8, fontSize: 12, color: '#777' }}>
-                说明：无需修改原图大小，训练会自动等比缩放并填充到 imgsz×imgsz；imgsz 越大对小目标更友好但更耗时/显存。
-                导出的 ONNX 为动态输入尺寸（动态shape），推理时可使用不同分辨率（建议为32的倍数）。
-                离线环境：请将预训练权重放到 <code>models/weights/&lt;模型变体&gt;.pt</code>（例如 yolo11n.pt），否则Ultralytics将尝试联网下载。
-              </div>
-            </div>
-
-            {trainJob && (
-              <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px dashed #eee' }}>
-                <div style={{ fontWeight: 600, marginBottom: 8 }}>训练</div>
-                <div>状态：{trainJob.status}</div>
-                {trainJob.map50 != null && (
-                  <div style={{ fontSize: 12, color: '#333' }}>mAP50: {trainJob.map50?.toFixed?.(4)} | mAP50-95: {trainJob.map50_95?.toFixed?.(4)} | P: {trainJob.precision?.toFixed?.(4)} | R: {trainJob.recall?.toFixed?.(4)}</div>
-                )}
-                <div style={{ marginTop: 8 }}>
-                  <div style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>实时日志</div>
-                  <div style={{ height: 180, overflow: 'auto', background: '#0b0f19', color: '#d6e5ff', padding: 8, borderRadius: 6, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace', fontSize: 12 }}>
-                    {logLines.map((l, i) => (<div key={i}>{l}</div>))}
-                  </div>
-                </div>
-                {artifacts.length > 0 && (
-                  <div style={{ marginTop: 8 }}>
-                    产物下载：
-                    <ul>
-                      {artifacts.map(a => (
-                        <li key={a.id}><a href={`/files/${a.path}`} target="_blank" rel="noreferrer">{a.format.toUpperCase()}</a></li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
           </div>
         </aside>

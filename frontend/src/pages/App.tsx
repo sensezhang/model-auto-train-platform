@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Annotator } from './Annotator'
+import { Training } from './Training'
 import { ExportDialog } from '../components/ExportDialog'
 
 type Project = { id: number; name: string }
@@ -42,6 +43,7 @@ export const App: React.FC = () => {
   const [exporting, setExporting] = useState<number | null>(null)
   const [exportDialogProject, setExportDialogProject] = useState<Project | null>(null)
   const [importDialogProject, setImportDialogProject] = useState<Project | null>(null)
+  const [generatingThumbnails, setGeneratingThumbnails] = useState<number | null>(null)
 
   const refresh = () => {
     fetch('/api/projects').then(r => r.json()).then(setProjects).catch(() => setProjects([]))
@@ -79,8 +81,18 @@ export const App: React.FC = () => {
     }
   }
 
-  const onImport = async (projectId: number, files: File[] | null, format: 'images' | 'yolo' | 'single' | 'folder' = 'images') => {
+  const onImport = async (projectId: number, files: File[] | null, format: 'images' | 'yolo' | 'coco' | 'single' | 'folder' = 'images') => {
     if (!files || files.length === 0) return
+
+    // 将文件转换为 Base64
+    const fileToBase64 = (file: File): Promise<string> => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result as string)
+        reader.onerror = reject
+        reader.readAsDataURL(file)
+      })
+    }
 
     // 单张图片上传
     if (format === 'single') {
@@ -94,11 +106,11 @@ export const App: React.FC = () => {
       setImportDialogProject(null)
 
       try {
-        const fd = new FormData()
-        fd.append('file', file)
-        const res = await fetch(`/api/projects/${projectId}/import/image`, {
+        const base64Data = await fileToBase64(file)
+        const res = await fetch(`/api/projects/${projectId}/import/image-base64`, {
           method: 'POST',
-          body: fd,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: file.name, data: base64Data }),
         })
         const data = await res.json()
         if (data.success) {
@@ -151,11 +163,11 @@ export const App: React.FC = () => {
         for (let i = 0; i < imageFiles.length; i++) {
           const file = imageFiles[i]
           try {
-            const fd = new FormData()
-            fd.append('file', file)
-            const res = await fetch(`/api/projects/${projectId}/import/image`, {
+            const base64Data = await fileToBase64(file)
+            const res = await fetch(`/api/projects/${projectId}/import/image-base64`, {
               method: 'POST',
-              body: fd,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ filename: file.name, data: base64Data }),
             })
             const data = await res.json()
             if (data.success) {
@@ -236,9 +248,13 @@ export const App: React.FC = () => {
       const fd = new FormData()
       fd.append('file', file)
 
-      if (format === 'yolo') {
-        // YOLO格式使用异步导入，返回job_id后轮询进度
-        const res = await fetch(`/api/projects/${projectId}/import/yolo?import_annotations=true`, {
+      if (format === 'yolo' || format === 'coco') {
+        // YOLO/COCO格式使用异步导入，返回job_id后轮询进度
+        const endpoint = format === 'yolo'
+          ? `/api/projects/${projectId}/import/yolo?import_annotations=true`
+          : `/api/projects/${projectId}/import/coco`
+
+        const res = await fetch(endpoint, {
           method: 'POST',
           body: fd,
         })
@@ -351,21 +367,62 @@ export const App: React.FC = () => {
     setExportDialogProject(project)
   }
 
+  const onGenerateThumbnails = async (projectId: number) => {
+    setGeneratingThumbnails(projectId)
+    try {
+      const res = await fetch(`/api/projects/${projectId}/generate-thumbnails`, { method: 'POST' })
+      const data = await res.json()
+      if (data.status === 'started') {
+        alert(`开始生成缩略图：${data.total} 张图片，请稍等...`)
+      } else if (data.status === 'completed') {
+        alert(data.message)
+      }
+    } catch (e) {
+      console.error(e)
+      alert('生成缩略图失败')
+    } finally {
+      setGeneratingThumbnails(null)
+    }
+  }
+
   if ((window as any).__view === 'annotator') {
     // 仅兼容性：不使用真实路由器。保留。
   }
 
-  const [view, setView] = useState<'home'|'annotator'>('home')
+  const [view, setView] = useState<'home'|'annotator'|'training'>('home')
   const [annotatorProjectId, setAnnotatorProjectId] = useState<number | null>(null)
 
   if (view === 'annotator' && annotatorProjectId != null) {
     return <Annotator projectId={annotatorProjectId} onBack={() => setView('home')} />
   }
 
+  if (view === 'training') {
+    return <Training onBack={() => setView('home')} />
+  }
+
   return (
     <div style={{ fontFamily: 'Inter, system-ui, Arial', padding: 16, maxWidth: 900, margin: '0 auto' }}>
-      <h2>标注与训练平台</h2>
-      <p>后端健康状态: {health}</p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <h2>标注与训练平台</h2>
+          <p>后端健康状态: {health}</p>
+        </div>
+        <button
+          onClick={() => setView('training')}
+          style={{
+            padding: '12px 24px',
+            backgroundColor: '#52c41a',
+            color: 'white',
+            border: 'none',
+            borderRadius: 6,
+            cursor: 'pointer',
+            fontWeight: 500,
+            fontSize: 16
+          }}
+        >
+          🚀 训练中心
+        </button>
+      </div>
 
       <section style={{ marginTop: 24, padding: 16, border: '1px solid #eee', borderRadius: 8 }}>
         <h3>创建项目</h3>
@@ -419,6 +476,13 @@ export const App: React.FC = () => {
                     </button>
                     <button onClick={() => onDeleteProject(p.id)} style={{ padding: '6px 10px', color: '#ff4d4f', borderColor: '#ff4d4f' }}>
                       {deleting === p.id ? '删除中...' : '删除项目'}
+                    </button>
+                    <button
+                      onClick={() => onGenerateThumbnails(p.id)}
+                      disabled={generatingThumbnails === p.id}
+                      style={{ padding: '6px 10px', backgroundColor: '#722ed1', color: 'white', border: '1px solid #722ed1', borderRadius: 6, cursor: generatingThumbnails === p.id ? 'not-allowed' : 'pointer' }}
+                    >
+                      {generatingThumbnails === p.id ? '生成中...' : '生成缩略图'}
                     </button>
                   </div>
                 </div>
@@ -507,9 +571,9 @@ const ImportDialog: React.FC<{
   projectId: number
   projectName: string
   onClose: () => void
-  onImport: (files: File[], format: 'images' | 'yolo' | 'single' | 'folder') => void
+  onImport: (files: File[], format: 'images' | 'yolo' | 'coco' | 'single' | 'folder') => void
 }> = ({ projectId, projectName, onClose, onImport }) => {
-  const [format, setFormat] = useState<'images' | 'yolo' | 'single' | 'folder'>('folder')
+  const [format, setFormat] = useState<'images' | 'yolo' | 'coco' | 'single' | 'folder'>('folder')
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const folderInputRef = React.useRef<HTMLInputElement>(null)
 
@@ -643,6 +707,33 @@ const ImportDialog: React.FC<{
               <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
                 包含 train/valid/test 文件夹、images 和 labels 子目录、data.yaml 类别定义。
                 将自动导入图片和标注，类别按名称匹配。
+              </div>
+            </div>
+          </label>
+
+          <label style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 8,
+            padding: 12,
+            border: format === 'coco' ? '2px solid #1890ff' : '1px solid #d9d9d9',
+            borderRadius: 6,
+            cursor: 'pointer',
+            marginBottom: 8,
+            backgroundColor: format === 'coco' ? '#e6f7ff' : 'white'
+          }}>
+            <input
+              type="radio"
+              name="format"
+              checked={format === 'coco'}
+              onChange={() => setFormat('coco')}
+              style={{ marginTop: 2 }}
+            />
+            <div>
+              <div style={{ fontWeight: 500 }}>COCO格式数据集</div>
+              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+                包含 train/valid/test 文件夹和 _annotations.coco.json 文件。
+                将自动导入图片和标注，类别自动创建或匹配。
               </div>
             </div>
           </label>

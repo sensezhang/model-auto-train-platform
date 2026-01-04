@@ -163,7 +163,7 @@ def _log(log_path: str, msg: str):
             pass
 
 
-def _train_with_ultralytics(yolo_model: str, data_yaml: str, out_dir: str, epochs: int, imgsz: int, batch: Optional[int], log_path: Optional[str] = None, job_id: Optional[int] = None) -> Dict:
+def _train_with_ultralytics(yolo_model: str, data_yaml: str, out_dir: str, epochs: int, imgsz: int, batch: Optional[int], log_path: Optional[str] = None, job_id: Optional[int] = None, device: Optional[str] = None) -> Dict:
     if log_path:
         _log(log_path, f"Entering _train_with_ultralytics function")
 
@@ -263,17 +263,24 @@ def _train_with_ultralytics(yolo_model: str, data_yaml: str, out_dir: str, epoch
         train_batch = 0
 
     if log_path:
-        _log(log_path, f"Starting model.train() with batch={train_batch}")
+        _log(log_path, f"Starting model.train() with batch={train_batch}, device={device or 'auto'}")
 
-    results = model.train(
-        data=data_yaml,
-        epochs=epochs,
-        imgsz=imgsz,
-        batch=train_batch,
-        project=out_dir,
-        name="train",
-        exist_ok=True,
-    )
+    # 准备训练参数
+    train_kwargs = {
+        'data': data_yaml,
+        'epochs': epochs,
+        'imgsz': imgsz,
+        'batch': train_batch,
+        'project': out_dir,
+        'name': "train",
+        'exist_ok': True,
+    }
+
+    # 添加device参数（支持多GPU）
+    if device:
+        train_kwargs['device'] = device
+
+    results = model.train(**train_kwargs)
 
     if log_path:
         _log(log_path, "model.train() completed, extracting metrics...")
@@ -337,10 +344,21 @@ def run_training_job(job_id: int):
         imgsz = job.imgsz
         batch = job.batch
         seed = job.seed
+        gpu_ids_str = job.gpuIds
         job.status = 'running'
         job.startedAt = job.startedAt or __import__('datetime').datetime.utcnow()
         session.add(job)
         session.commit()
+
+    # 解析GPU配置
+    device = None
+    if gpu_ids_str:
+        gpu_ids = [int(x.strip()) for x in gpu_ids_str.split(',') if x.strip()]
+        if len(gpu_ids) == 1:
+            device = str(gpu_ids[0])
+        elif len(gpu_ids) > 1:
+            # 多GPU训练：YOLO支持逗号分隔的设备列表
+            device = ','.join(str(i) for i in gpu_ids)
 
     # Prepare dataset
     out_dir = os.path.join(os.getcwd(), 'models', str(project_id), str(job_id))
@@ -378,8 +396,8 @@ def run_training_job(job_id: int):
                 f"Weights '{weight_path}' not found locally. Ultralytics will attempt to download. "
                 f"If your environment cannot access GitHub, please manually place the weight file as '{os.path.join(weights_root, _yolo_name_for_variant(model_variant))}'."
             ))
-        _log(log_path, f"Training start weights={weight_path} epochs={epochs} imgsz={imgsz} batch={batch or 'auto'}")
-        res = _train_with_ultralytics(weight_path, yaml_path, out_dir, epochs, imgsz, batch, log_path, job_id)
+        _log(log_path, f"Training start weights={weight_path} epochs={epochs} imgsz={imgsz} batch={batch or 'auto'} device={device or 'auto'}")
+        res = _train_with_ultralytics(weight_path, yaml_path, out_dir, epochs, imgsz, batch, log_path, job_id, device)
         _log(log_path, f"Training function returned: {list(res.keys()) if res else 'None'}")
         metrics = res.get('metrics', {})
         best_pt = res.get('best_pt')

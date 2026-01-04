@@ -380,9 +380,10 @@ def export_dataset_to_coco(
                         coco_data['annotations'].append(new_ann)
 
             # 保存标注文件
-            annotations_file = os.path.join(output_dir, split_name, '_annotations.json')
+            # 使用ensure_ascii=True避免Windows上的gbk编码问题
+            annotations_file = os.path.join(output_dir, split_name, '_annotations.coco.json')
             with open(annotations_file, 'w', encoding='utf-8') as f:
-                json.dump(coco_data, f, indent=2, ensure_ascii=False)
+                json.dump(coco_data, f, indent=2, ensure_ascii=True)
 
             # 更新统计信息
             stats[split_name]['images'] = len(coco_data['images'])
