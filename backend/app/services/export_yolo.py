@@ -7,6 +7,7 @@ from ..db import get_session
 from ..models import Project, Class, Image, Annotation
 from .export_coco import split_dataset
 from .augmentation import AugmentationConfig, augment_image_with_annotations
+from ..utils.oss_storage import resolve_local_path, get_basename
 
 
 def export_dataset_to_yolo(
@@ -121,12 +122,14 @@ def export_dataset_to_yolo(
 
             for img in split_images:
                 img_annotations = [ann for ann in split_annotations if ann.imageId == img.id]
-                src_path = img.path
 
-                if not os.path.exists(src_path):
+                # 支持 OSS URL 和本地路径，自动下载缓存
+                src_path = resolve_local_path(img.path)
+                if src_path is None:
+                    print(f"[export_yolo] 跳过无法定位的图片: {img.path}")
                     continue
 
-                base_filename = os.path.basename(img.path)
+                base_filename = get_basename(img.path)
                 name_without_ext = os.path.splitext(base_filename)[0]
 
                 # 是否对此划分应用增强（仅训练集）

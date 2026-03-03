@@ -1,0 +1,49 @@
+# 训练数据和模型（全部通过 volume 挂载，不打入镜像）
+backend/models/
+backend/datasets/
+backend/datasets_coco/
+backend/output/
+backend/logs/
+backend/data/
+
+# 缓存和权重
+backend/.torch/
+backend/.cache/
+backend/.ultralytics/
+backend/pretrained/
+
+# 数据库
+backend/app.db
+backend/*.db
+
+# 环境配置（敏感信息，由外部注入，不打入镜像）
+backend/.env
+**/.env
+
+# 模型权重文件
+*.pth
+*.pt
+*.onnx
+*.bin
+*.safetensors
+
+# 前端构建产物
+frontend/node_modules/
+frontend/dist/
+
+# Python 缓存
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.venv/
+**/venv/
+
+# 开发工具
+.git/
+.idea/
+.vscode/
+.claude/
+
+# 日志
+*.log
+backend/models/training_logs/

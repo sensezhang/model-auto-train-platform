@@ -40,6 +40,7 @@ class Image(SQLModel, table=True):
     height: Optional[int] = None
     checksum: Optional[str] = None
     status: ImageStatus = Field(default="unannotated")
+    labeled: bool = Field(default=False)  # 已完成标注（含负样本）
     createdAt: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -82,10 +83,13 @@ class JobStatus(str, Enum):
 class AutoLabelJob(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     projectId: int = Field(foreign_key="project.id")
+    classId: Optional[int] = Field(default=None)
+    prompt: Optional[str] = Field(default=None)
     status: JobStatus = Field(default="pending")
     concurrency: int = Field(default=2)
     threshold: float = Field(default=0.5)
     imagesCount: int = Field(default=0)
+    processedCount: int = Field(default=0)
     boxesCount: int = Field(default=0)
     logsRef: Optional[str] = None
     startedAt: Optional[datetime] = None

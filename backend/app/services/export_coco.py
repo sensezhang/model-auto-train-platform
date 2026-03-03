@@ -8,6 +8,7 @@ import random
 from ..db import get_session
 from ..models import Project, Class, Image, Annotation
 from .augmentation import AugmentationConfig, augment_image_with_annotations
+from ..utils.oss_storage import resolve_local_path
 
 
 def split_dataset(
@@ -252,9 +253,9 @@ def export_dataset_to_coco(
 
             for img in split_images:
                 img_annotations = [ann for ann in split_annotations if ann.imageId == img.id]
-                src_path = img.path
+                src_path = resolve_local_path(img.path)
 
-                if not os.path.exists(src_path):
+                if not src_path:
                     continue
 
                 base_filename = os.path.basename(img.path)

@@ -13,9 +13,13 @@ ALLOWED_EXTS = {".jpg", ".jpeg", ".png"}
 
 # 缩略图配置
 THUMBNAIL_WIDTH = 200  # 缩略图宽度
-DISPLAY_WIDTH = 1920   # 标注用图宽度
-JPEG_QUALITY = 85      # JPEG 压缩质量
+DISPLAY_WIDTH   = 1920  # 标注用图宽度
+JPEG_QUALITY    = 85   # JPEG 压缩质量
 
+
+# ──────────────────────────────────────────────────────────────
+# 本地目录辅助
+# ──────────────────────────────────────────────────────────────
 
 def datasets_root() -> str:
     root = os.path.join(os.getcwd(), "datasets")
@@ -43,60 +47,82 @@ def project_display_dir(project_id: int) -> str:
     return path
 
 
+# ──────────────────────────────────────────────────────────────
+# 路径 / URL 工具
+# ──────────────────────────────────────────────────────────────
+
+def _rel(abs_path: str) -> str:
+    """将绝对路径转换为相对于 CWD 的相对路径（统一正斜杠）"""
+    return os.path.relpath(abs_path, os.getcwd()).replace("\\", "/")
+
+
+def _to_storage_path(rel_path: str, local_abs_path: str) -> str:
+    """返回文件的相对路径（本地文件服务）"""
+    return rel_path
+
+
+# ──────────────────────────────────────────────────────────────
+# 缩略图 / 标注用图生成
+# ──────────────────────────────────────────────────────────────
+
 def generate_thumbnail_and_display(
     original_path: str,
     project_id: int,
-    filename: str
+    filename: str,
 ) -> Tuple[Optional[str], Optional[str]]:
     """
-    根据原图生成缩略图和标注用图
+    根据原图生成缩略图和标注用图。
 
     Args:
-        original_path: 原图路径
-        project_id: 项目ID
-        filename: 文件名
+        original_path : 原图本地绝对路径
+        project_id    : 项目 ID
+        filename      : 目标文件名（统一存为 .jpg）
 
     Returns:
-        (thumbnail_path, display_path) 相对路径元组
+        (thumbnail_storage_path, display_storage_path) 均为相对路径
     """
     try:
         with PILImage.open(original_path) as img:
-            # 转换为 RGB（处理 RGBA 等格式）
-            if img.mode in ('RGBA', 'P'):
-                img = img.convert('RGB')
+            # 转换为 RGB（处理 RGBA/P 等格式）
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
 
             orig_width, orig_height = img.size
 
-            # 生成缩略图
-            thumb_dir = project_thumbnails_dir(project_id)
-            thumb_path = os.path.join(thumb_dir, filename)
+            # ── 缩略图 ──────────────────────────────────────────
+            thumb_dir  = project_thumbnails_dir(project_id)
+            thumb_abs  = os.path.join(thumb_dir, filename)
             if orig_width > THUMBNAIL_WIDTH:
                 ratio = THUMBNAIL_WIDTH / orig_width
-                thumb_size = (THUMBNAIL_WIDTH, int(orig_height * ratio))
-                thumb_img = img.resize(thumb_size, PILImage.LANCZOS)
+                thumb_img = img.resize((THUMBNAIL_WIDTH, int(orig_height * ratio)), PILImage.LANCZOS)
             else:
                 thumb_img = img.copy()
-            thumb_img.save(thumb_path, 'JPEG', quality=JPEG_QUALITY)
-            thumb_rel = os.path.relpath(thumb_path, os.getcwd())
+            thumb_img.save(thumb_abs, "JPEG", quality=JPEG_QUALITY)
+            thumb_rel  = _rel(thumb_abs)
+            thumb_path = _to_storage_path(thumb_rel, thumb_abs)
 
-            # 生成标注用图
-            display_dir = project_display_dir(project_id)
-            display_path = os.path.join(display_dir, filename)
+            # ── 标注用图 ────────────────────────────────────────
+            display_dir  = project_display_dir(project_id)
+            display_abs  = os.path.join(display_dir, filename)
             if orig_width > DISPLAY_WIDTH:
                 ratio = DISPLAY_WIDTH / orig_width
-                display_size = (DISPLAY_WIDTH, int(orig_height * ratio))
-                display_img = img.resize(display_size, PILImage.LANCZOS)
+                display_img = img.resize((DISPLAY_WIDTH, int(orig_height * ratio)), PILImage.LANCZOS)
             else:
                 display_img = img.copy()
-            display_img.save(display_path, 'JPEG', quality=JPEG_QUALITY)
-            display_rel = os.path.relpath(display_path, os.getcwd())
+            display_img.save(display_abs, "JPEG", quality=JPEG_QUALITY)
+            display_rel  = _rel(display_abs)
+            display_path = _to_storage_path(display_rel, display_abs)
 
-            return thumb_rel, display_rel
+            return thumb_path, display_path
 
     except Exception as e:
         print(f"生成缩略图失败: {e}")
         return None, None
 
+
+# ──────────────────────────────────────────────────────────────
+# 基础工具
+# ──────────────────────────────────────────────────────────────
 
 def sha1_of_bytes(b: bytes) -> str:
     h = hashlib.sha1()
@@ -116,20 +142,22 @@ def read_image_size(data: bytes) -> Tuple[int, int]:
         return im.width, im.height
 
 
+# ──────────────────────────────────────────────────────────────
+# ZIP 批量导入
+# ──────────────────────────────────────────────────────────────
+
 async def extract_images_from_zip(project_id: int, upload_file) -> Dict[str, int]:
-    total = 0
-    imported = 0
+    total      = 0
+    imported   = 0
     duplicates = 0
-    errors = 0
+    errors     = 0
 
     images_dir = project_images_dir(project_id)
 
-    # 使用UploadFile.file (SpooledTemporaryFile) 直接读
     fileobj = upload_file.file
     fileobj.seek(0)
     with zipfile.ZipFile(fileobj) as zf:
         for info in zf.infolist():
-            # 跳过目录或隐藏文件
             if info.is_dir():
                 continue
             name_lower = info.filename.lower()
@@ -146,7 +174,6 @@ async def extract_images_from_zip(project_id: int, upload_file) -> Dict[str, int
 
             checksum = sha1_of_bytes(data)
 
-            # 去重：同一project下checksum重复则跳过
             with get_session() as session:
                 exists = (
                     session.query(DBImage)
@@ -157,36 +184,31 @@ async def extract_images_from_zip(project_id: int, upload_file) -> Dict[str, int
                     duplicates += 1
                     continue
 
-            # 安全文件名
-            base_name = os.path.basename(info.filename)
-            if not base_name:
-                base_name = checksum + ext
-            dest_path = safe_join(images_dir, base_name)
-
-            # 若重名，使用checksum前缀避免覆盖
-            if os.path.exists(dest_path):
-                dest_path = safe_join(images_dir, f"{checksum}{ext}")
+            base_name = os.path.basename(info.filename) or (checksum + ext)
+            dest_abs  = safe_join(images_dir, base_name)
+            if os.path.exists(dest_abs):
+                dest_abs = safe_join(images_dir, f"{checksum}{ext}")
 
             try:
-                with open(dest_path, "wb") as f:
+                with open(dest_abs, "wb") as f:
                     f.write(data)
                 width, height = read_image_size(data)
             except Exception:
                 errors += 1
-                # 清理失败文件
                 try:
-                    if os.path.exists(dest_path):
-                        os.remove(dest_path)
+                    if os.path.exists(dest_abs):
+                        os.remove(dest_abs)
                 except Exception:
                     pass
                 continue
 
-            # 写入DB
-            rel_path = os.path.relpath(dest_path, os.getcwd())
+            dest_rel  = _rel(dest_abs)
+            img_path  = _to_storage_path(dest_rel, dest_abs)
+
             with get_session() as session:
                 db_img = DBImage(
                     projectId=project_id,
-                    path=rel_path,
+                    path=img_path,
                     width=width,
                     height=height,
                     checksum=checksum,
@@ -200,17 +222,11 @@ async def extract_images_from_zip(project_id: int, upload_file) -> Dict[str, int
     return {"total": total, "imported": imported, "duplicates": duplicates, "errors": errors}
 
 
+# ──────────────────────────────────────────────────────────────
+# 单张图片导入（multipart/form-data）
+# ──────────────────────────────────────────────────────────────
+
 async def import_single_image(project_id: int, upload_file) -> Dict[str, any]:
-    """
-    导入单张图片
-
-    Args:
-        project_id: 项目ID
-        upload_file: 上传的文件对象
-
-    Returns:
-        导入结果，包含 success, message, image_id 等信息
-    """
     filename = upload_file.filename or ""
     ext = os.path.splitext(filename.lower())[1]
 
@@ -220,14 +236,12 @@ async def import_single_image(project_id: int, upload_file) -> Dict[str, any]:
     images_dir = project_images_dir(project_id)
 
     try:
-        # 读取文件数据
         data = await upload_file.read()
     except Exception as e:
         return {"success": False, "message": f"读取文件失败: {e}"}
 
     checksum = sha1_of_bytes(data)
 
-    # 去重检查
     with get_session() as session:
         exists = (
             session.query(DBImage)
@@ -237,41 +251,34 @@ async def import_single_image(project_id: int, upload_file) -> Dict[str, any]:
         if exists:
             return {"success": False, "message": "图片已存在（重复）", "duplicate": True, "image_id": exists.id}
 
-    # 安全文件名
-    base_name = os.path.basename(filename)
-    if not base_name:
-        base_name = checksum + ext
-    dest_path = safe_join(images_dir, base_name)
-
-    # 若重名，使用checksum前缀避免覆盖
-    if os.path.exists(dest_path):
-        dest_path = safe_join(images_dir, f"{checksum}{ext}")
+    base_name = os.path.basename(filename) or (checksum + ext)
+    dest_abs  = safe_join(images_dir, base_name)
+    if os.path.exists(dest_abs):
+        dest_abs = safe_join(images_dir, f"{checksum}{ext}")
 
     try:
-        with open(dest_path, "wb") as f:
+        with open(dest_abs, "wb") as f:
             f.write(data)
         width, height = read_image_size(data)
     except Exception as e:
-        # 清理失败文件
         try:
-            if os.path.exists(dest_path):
-                os.remove(dest_path)
+            if os.path.exists(dest_abs):
+                os.remove(dest_abs)
         except Exception:
             pass
         return {"success": False, "message": f"保存图片失败: {e}"}
 
-    # 生成缩略图和标注用图
-    final_filename = os.path.basename(dest_path)
-    # 确保文件名是 .jpg 格式（缩略图统一用 jpg）
+    final_filename = os.path.basename(dest_abs)
     thumb_filename = os.path.splitext(final_filename)[0] + ".jpg"
-    thumb_path, display_path = generate_thumbnail_and_display(dest_path, project_id, thumb_filename)
+    thumb_path, display_path = generate_thumbnail_and_display(dest_abs, project_id, thumb_filename)
 
-    # 写入DB
-    rel_path = os.path.relpath(dest_path, os.getcwd())
+    dest_rel  = _rel(dest_abs)
+    img_path  = _to_storage_path(dest_rel, dest_abs)
+
     with get_session() as session:
         db_img = DBImage(
             projectId=project_id,
-            path=rel_path,
+            path=img_path,
             thumbnailPath=thumb_path,
             displayPath=display_path,
             width=width,
@@ -287,18 +294,11 @@ async def import_single_image(project_id: int, upload_file) -> Dict[str, any]:
     return {"success": True, "message": "导入成功", "image_id": image_id}
 
 
+# ──────────────────────────────────────────────────────────────
+# 单张图片导入（Base64）
+# ──────────────────────────────────────────────────────────────
+
 def import_image_from_base64(project_id: int, filename: str, base64_data: str) -> Dict[str, any]:
-    """
-    从 Base64 数据导入图片（避免 multipart/form-data）
-
-    Args:
-        project_id: 项目ID
-        filename: 文件名
-        base64_data: Base64 编码的图片数据
-
-    Returns:
-        导入结果
-    """
     import base64
 
     ext = os.path.splitext(filename.lower())[1]
@@ -308,14 +308,12 @@ def import_image_from_base64(project_id: int, filename: str, base64_data: str) -
     images_dir = project_images_dir(project_id)
 
     try:
-        # 解码 Base64 数据
         data = base64.b64decode(base64_data)
     except Exception as e:
         return {"success": False, "message": f"Base64 解码失败: {e}"}
 
     checksum = sha1_of_bytes(data)
 
-    # 去重检查
     with get_session() as session:
         exists = (
             session.query(DBImage)
@@ -325,39 +323,34 @@ def import_image_from_base64(project_id: int, filename: str, base64_data: str) -
         if exists:
             return {"success": False, "message": "图片已存在（重复）", "duplicate": True, "image_id": exists.id}
 
-    # 安全文件名
-    base_name = os.path.basename(filename)
-    if not base_name:
-        base_name = checksum + ext
-    dest_path = safe_join(images_dir, base_name)
-
-    # 若重名，使用checksum前缀避免覆盖
-    if os.path.exists(dest_path):
-        dest_path = safe_join(images_dir, f"{checksum}{ext}")
+    base_name = os.path.basename(filename) or (checksum + ext)
+    dest_abs  = safe_join(images_dir, base_name)
+    if os.path.exists(dest_abs):
+        dest_abs = safe_join(images_dir, f"{checksum}{ext}")
 
     try:
-        with open(dest_path, "wb") as f:
+        with open(dest_abs, "wb") as f:
             f.write(data)
         width, height = read_image_size(data)
     except Exception as e:
         try:
-            if os.path.exists(dest_path):
-                os.remove(dest_path)
+            if os.path.exists(dest_abs):
+                os.remove(dest_abs)
         except Exception:
             pass
         return {"success": False, "message": f"保存图片失败: {e}"}
 
-    # 生成缩略图和标注用图
-    final_filename = os.path.basename(dest_path)
+    final_filename = os.path.basename(dest_abs)
     thumb_filename = os.path.splitext(final_filename)[0] + ".jpg"
-    thumb_path, display_path = generate_thumbnail_and_display(dest_path, project_id, thumb_filename)
+    thumb_path, display_path = generate_thumbnail_and_display(dest_abs, project_id, thumb_filename)
 
-    # 写入DB
-    rel_path = os.path.relpath(dest_path, os.getcwd())
+    dest_rel  = _rel(dest_abs)
+    img_path  = _to_storage_path(dest_rel, dest_abs)
+
     with get_session() as session:
         db_img = DBImage(
             projectId=project_id,
-            path=rel_path,
+            path=img_path,
             thumbnailPath=thumb_path,
             displayPath=display_path,
             width=width,

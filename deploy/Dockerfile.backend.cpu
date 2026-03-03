@@ -1,0 +1,78 @@
+# 后端 Dockerfile - CPU 版本（无 GPU 支持）
+# 适用于测试环境或仅标注使用
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 设置环境变量
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Shanghai
+ENV PYTHONUNBUFFERED=1
+ENV TORCH_HOME=/app/.torch
+ENV HF_HOME=/app/.cache/huggingface
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgomp1 \
+    git \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 复制依赖文件
+COPY backend/requirements.txt .
+
+# 创建修改后的 requirements（移除 GPU 相关依赖）
+RUN sed -i '/torch==/d' requirements.txt && \
+    sed -i '/torchvision==/d' requirements.txt
+
+# 安装 CPU 版本的 PyTorch
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# 安装其他 Python 依赖
+RUN pip install --no-cache-dir -r requirements.txt \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    --trusted-host pypi.tuna.tsinghua.edu.cn
+
+# 安装 RF-DETR
+RUN pip install --no-cache-dir rfdetr \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    --trusted-host pypi.tuna.tsinghua.edu.cn || \
+    pip install --no-cache-dir git+https://github.com/roboflow/rf-detr.git
+
+# 安装 ONNX Runtime CPU
+RUN pip install --no-cache-dir onnxruntime \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    --trusted-host pypi.tuna.tsinghua.edu.cn
+
+# 强制重装 ONNX 相关依赖（修复版本冲突问题）
+# rfdetr 可能安装了不兼容的 onnx 版本，这里强制覆盖
+RUN pip install --no-cache-dir --force-reinstall \
+    onnx==1.17.0 \
+    onnx_graphsurgeon==0.5.2 \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    --trusted-host pypi.tuna.tsinghua.edu.cn
+
+# 复制后端代码
+COPY backend/ .
+
+# 创建必要目录
+RUN mkdir -p datasets models data output .torch .cache/huggingface .ultralytics
+
+# 设置目录权限
+RUN chmod -R 777 datasets models data output .torch .cache .ultralytics
+
+# 暴露端口
+EXPOSE 8000
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/api/system/gpus || exit 1
+
+# 启动命令
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

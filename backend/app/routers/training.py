@@ -210,6 +210,129 @@ async def stream_logs(job_id: int):
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
+@router.get("/training/jobs/{job_id}/result-image")
+def get_training_result_image(job_id: int):
+    """
+    获取训练结果图片（metrics_plot.png 或 results.png）
+
+    Args:
+        job_id: 训练任务ID
+
+    Returns:
+        训练结果图片
+    """
+    with get_session() as session:
+        job = session.get(TrainingJob, job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+
+        # 只有训练成功的任务才有结果图片
+        if job.status != 'succeeded':
+            raise HTTPException(404, "Training not completed or failed")
+
+        project_id = job.projectId
+
+    # 构建可能的图片路径
+    base_dir = os.path.join(os.getcwd(), 'models', str(project_id), str(job_id))
+
+    # 检查多个可能的图片位置
+    possible_paths = [
+        # RF-DETR: 直接在训练目录下
+        os.path.join(base_dir, 'metrics_plot.png'),
+        # YOLO: 在train子目录下
+        os.path.join(base_dir, 'train', 'results.png'),
+        os.path.join(base_dir, 'train', 'confusion_matrix.png'),
+    ]
+
+    for img_path in possible_paths:
+        if os.path.isfile(img_path):
+            return FileResponse(
+                path=img_path,
+                media_type='image/png',
+                filename=os.path.basename(img_path)
+            )
+
+    raise HTTPException(404, "Result image not found")
+
+
+@router.get("/training/jobs/{job_id}/result-images")
+def list_training_result_images(job_id: int):
+    """
+    列出训练任务的所有结果图片
+
+    Args:
+        job_id: 训练任务ID
+
+    Returns:
+        可用的图片列表
+    """
+    with get_session() as session:
+        job = session.get(TrainingJob, job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+
+        project_id = job.projectId
+
+    base_dir = os.path.join(os.getcwd(), 'models', str(project_id), str(job_id))
+
+    # 查找所有PNG图片
+    images = []
+    search_dirs = [base_dir, os.path.join(base_dir, 'train')]
+
+    for search_dir in search_dirs:
+        if os.path.isdir(search_dir):
+            for filename in os.listdir(search_dir):
+                if filename.endswith('.png'):
+                    images.append({
+                        'name': filename,
+                        'path': f'/api/training/jobs/{job_id}/image/{filename}'
+                    })
+
+    return images
+
+
+@router.get("/training/jobs/{job_id}/image/{filename}")
+def get_training_image(job_id: int, filename: str):
+    """
+    获取指定的训练图片
+
+    Args:
+        job_id: 训练任务ID
+        filename: 图片文件名
+
+    Returns:
+        图片文件
+    """
+    # 安全检查：防止路径遍历
+    if '..' in filename or '/' in filename or '\\' in filename:
+        raise HTTPException(400, "Invalid filename")
+
+    with get_session() as session:
+        job = session.get(TrainingJob, job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+
+        project_id = job.projectId
+
+    base_dir = os.path.join(os.getcwd(), 'models', str(project_id), str(job_id))
+
+    # 检查多个可能的位置
+    possible_paths = [
+        os.path.join(base_dir, filename),
+        os.path.join(base_dir, 'train', filename),
+    ]
+
+    for img_path in possible_paths:
+        if os.path.isfile(img_path):
+            return FileResponse(
+                path=img_path,
+                media_type='image/png',
+                filename=filename
+            )
+
+    raise HTTPException(404, "Image not found")
+
+
 @router.get("/training/artifacts/{artifact_id}/download")
 def download_artifact(artifact_id: int):
     """

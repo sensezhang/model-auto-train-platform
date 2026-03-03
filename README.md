@@ -5,25 +5,59 @@
 ## 快速开始
 
 ### 后端（FastAPI）
-1. 在项目根目录安装依赖（推荐使用项目根目录的虚拟环境）：
+1. 创建并激活虚拟环境，安装依赖：
    ```bash
-   # Windows
-   .venv\Scripts\python -m pip install fastapi uvicorn[standard] sqlmodel pydantic python-multipart Jinja2 Pillow ultralytics
+   # Windows (在项目根目录执行)
+   python -m venv .venv
+   .venv\Scripts\activate
+   python -m pip install --upgrade pip
+   pip install -r backend/requirements.txt
 
-   # Linux/Mac
-   .venv/bin/python -m pip install fastapi uvicorn[standard] sqlmodel pydantic python-multipart Jinja2 Pillow ultralytics
+   # Linux/Mac (在项目根目录执行)
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install -r backend/requirements.txt
    ```
+
+   > **PyTorch CUDA 支持**：如需 GPU 加速，请先安装 CUDA 版本的 PyTorch：
+   > ```bash
+   > pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+   > ```
 
 2. 启动后端服务：
-   ```bash
-   # Windows
-   cd backend
-   ..\.venv\Scripts\uvicorn app.main:app --reload --port 8000
 
-   # Linux/Mac
+   **方式一：前台启动（日志同时打印到终端 + 写入文件，推荐开发时使用）**
+   ```powershell
+   # PowerShell 中执行
+   conda activate yolo-train-test-py311
    cd backend
-   ../venv/bin/uvicorn app.main:app --reload --port 8000
+   New-Item -ItemType Directory -Force -Path logs | Out-Null
+   $log = "logs\backend_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+   python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | Tee-Object -FilePath $log
    ```
+
+   **方式二：后台启动（日志只写文件，适合长期运行）**
+   ```powershell
+   # PowerShell 中执行
+   conda activate yolo-train-test-py311
+   cd backend
+   New-Item -ItemType Directory -Force -Path logs | Out-Null
+   $log = "logs\backend_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+   Start-Process python -ArgumentList "-m","uvicorn","app.main:app","--host","0.0.0.0","--port","8000" `
+       -WorkingDirectory (Get-Location) `
+       -RedirectStandardOutput $log `
+       -RedirectStandardError ($log -replace '\.log$','_err.log') `
+       -NoNewWindow
+   Write-Host "服务已后台启动，日志: $log"
+   ```
+
+   **实时查看日志**
+   ```powershell
+   Get-Content logs\backend_*.log -Wait
+   ```
+
+   > **注意**：不要加 `--reload`，会导致子进程 Python 版本异常。
 
 3. 健康检查：访问 http://localhost:8000/api/health
 

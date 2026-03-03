@@ -16,6 +16,7 @@ from sqlmodel import select
 
 from ..db import get_session
 from ..models import Image as DBImage, Annotation as DBAnn, Class as DBClass, TrainingJob, ModelArtifact
+from ..utils.oss_storage import resolve_local_path, get_basename
 
 
 def _ensure_dir(p: str):
@@ -64,8 +65,18 @@ def _class_index(project_id: int) -> Dict[int, int]:
 def _make_dataset(project_id: int, seed: int = 42) -> Tuple[str, str, Dict[str, int]]:
     imgs, anns_map = _collect_annotated_images(project_id)
     base_cwd = os.getcwd()
-    imgs = [img for img in imgs if os.path.isfile(os.path.join(base_cwd, img.path))]
-    counts = {"images": len(imgs), "annotations": sum(len(v) for v in anns_map.values())}
+
+    # 解析每张图片的本地路径（支持 OSS URL 和本地相对路径）
+    # resolve_local_path 在本地无缓存时会自动从 OSS 下载
+    imgs_resolved: List[Tuple[DBImage, str]] = []
+    for img in imgs:
+        local = resolve_local_path(img.path)
+        if local:
+            imgs_resolved.append((img, local))
+        else:
+            print(f"[training] 跳过无法定位的图片: {img.path}")
+
+    counts = {"images": len(imgs_resolved), "annotations": sum(len(v) for v in anns_map.values())}
     base_dir = os.path.join(base_cwd, "datasets", str(project_id))
     images_dir = os.path.join(base_dir, "images")
     labels_dir = os.path.join(base_dir, "labels")
@@ -77,12 +88,12 @@ def _make_dataset(project_id: int, seed: int = 42) -> Tuple[str, str, Dict[str, 
         raise RuntimeError("No annotated images found")
 
     # Split 80/20 with safeguards to keep both splits non-empty
-    random.Random(seed).shuffle(imgs)
-    n = len(imgs)
+    random.Random(seed).shuffle(imgs_resolved)
+    n = len(imgs_resolved)
     if n < 2:
         raise RuntimeError("Need at least 2 annotated images with files present for train/val split")
     k = max(1, min(n - 1, int(0.8 * n)))
-    train_set = set(i.id for i in imgs[:k])
+    train_set = set(img.id for img, _ in imgs_resolved[:k])
 
     cls_map = _class_index(project_id)
 
@@ -97,9 +108,8 @@ def _make_dataset(project_id: int, seed: int = 42) -> Tuple[str, str, Dict[str, 
 
     train_written = 0
     val_written = 0
-    for img in imgs:
+    for img, src_path in imgs_resolved:
         split = "train" if img.id in train_set else "val"
-        src_path = os.path.join(os.getcwd(), img.path)
         dst_img = os.path.join(images_dir, split, os.path.basename(src_path))
         if os.path.exists(dst_img):
             os.remove(dst_img)
@@ -193,10 +203,16 @@ def _train_with_ultralytics(yolo_model: str, data_yaml: str, out_dir: str, epoch
         _log(log_path, f"YOLO model loaded: {yolo_model}")
 
         try:
+            def on_pretrain_routine_start(trainer):
+                try:
+                    _log(log_path, "Pre-training routine started")
+                except Exception as e:
+                    _log(log_path, f"Error in on_pretrain_routine_start: {e}")
+
             def on_train_start(trainer):
                 try:
-                    _log(log_path, "Training started - on_train_start callback triggered")
-                    _log(log_path, f"Trainer epochs: {getattr(trainer, 'epochs', 'unknown')}")
+                    _log(log_path, "Training loop started")
+                    _log(log_path, f"Total epochs: {getattr(trainer, 'epochs', 'unknown')}")
                 except Exception as e:
                     _log(log_path, f"Error in on_train_start: {e}")
 
@@ -204,36 +220,60 @@ def _train_with_ultralytics(yolo_model: str, data_yaml: str, out_dir: str, epoch
                 try:
                     ep = getattr(trainer, 'epoch', None)
                     total = getattr(trainer, 'epochs', None)
-                    _log(log_path, f"Starting epoch {(ep+1) if isinstance(ep, int) else '?'} / {total if total is not None else '?'}")
+                    _log(log_path, f"Epoch {(ep+1) if isinstance(ep, int) else '?'}/{total if total is not None else '?'} started")
                 except Exception as e:
                     _log(log_path, f"Error in on_train_epoch_start: {e}")
 
-            def on_epoch_end(trainer):
+            def on_train_epoch_end(trainer):
                 try:
                     ep = getattr(trainer, 'epoch', None)
                     total = getattr(trainer, 'epochs', None)
-                    loss_items = getattr(trainer, 'loss_items', None)
+                    # Try to get loss from different sources
                     loss_val = None
-                    if isinstance(loss_items, (list, tuple)) and loss_items:
-                        loss_val = float(loss_items[0])
-                    _log(log_path, f"Completed epoch {(ep+1) if isinstance(ep,int) else '?'} / {total if total is not None else '?'} loss={loss_val}")
+                    if hasattr(trainer, 'loss') and trainer.loss is not None:
+                        try:
+                            loss_val = float(trainer.loss.item() if hasattr(trainer.loss, 'item') else trainer.loss)
+                        except:
+                            pass
+                    if loss_val is None and hasattr(trainer, 'tloss') and trainer.tloss is not None:
+                        try:
+                            loss_val = float(trainer.tloss.item() if hasattr(trainer.tloss, 'item') else trainer.tloss)
+                        except:
+                            pass
+
+                    loss_str = f"{loss_val:.4f}" if loss_val is not None else "N/A"
+                    _log(log_path, f"Epoch {(ep+1) if isinstance(ep,int) else '?'}/{total if total is not None else '?'} completed, loss={loss_str}")
+
                     # cancellation check
                     if job_id is not None:
                         try:
                             with get_session() as session:
                                 jb = session.get(TrainingJob, job_id)
                                 if jb and jb.status == 'canceled':
-                                    _log(log_path, "Cancellation requested. Stopping training after this epoch...")
-                                    setattr(trainer, 'stop_training', True)
-                                    setattr(trainer, 'stop', True)
+                                    _log(log_path, "Cancellation requested. Stopping training...")
+                                    trainer.stop = True
                         except Exception as e2:
                             _log(log_path, f"Error checking cancellation: {e2}")
                 except Exception as e:
-                    _log(log_path, f"Error in on_epoch_end: {e}")
+                    _log(log_path, f"Error in on_train_epoch_end: {e}")
 
+            def on_fit_epoch_end(trainer):
+                try:
+                    # Log validation metrics if available
+                    metrics = getattr(trainer, 'metrics', None)
+                    if metrics:
+                        map50 = metrics.get('metrics/mAP50', None)
+                        map50_95 = metrics.get('metrics/mAP50-95', None)
+                        if map50 is not None or map50_95 is not None:
+                            _log(log_path, f"  Validation: mAP50={map50:.4f if map50 else 'N/A'}, mAP50-95={map50_95:.4f if map50_95 else 'N/A'}")
+                except Exception as e:
+                    pass  # Silent fail for metrics logging
+
+            model.add_callback('on_pretrain_routine_start', on_pretrain_routine_start)
             model.add_callback('on_train_start', on_train_start)
             model.add_callback('on_train_epoch_start', on_train_epoch_start)
-            model.add_callback('on_fit_epoch_end', on_epoch_end)
+            model.add_callback('on_train_epoch_end', on_train_epoch_end)
+            model.add_callback('on_fit_epoch_end', on_fit_epoch_end)
             _log(log_path, "Training callbacks registered")
         except Exception as e:
             _log(log_path, f"Error setting up callbacks: {e}")
@@ -249,23 +289,31 @@ def _train_with_ultralytics(yolo_model: str, data_yaml: str, out_dir: str, epoch
             except ValueError:
                 batch = 0
 
+    # Use a safe default batch size instead of auto (0) to avoid OOM during auto-batch detection
+    # Auto-batch detection can consume too much VRAM and cause OOM errors
+    DEFAULT_BATCH = 16
+
     if batch is None:
-        train_batch = 0
+        train_batch = DEFAULT_BATCH
     elif isinstance(batch, (int, float)):
         if batch <= 0:
-            train_batch = 0
+            train_batch = DEFAULT_BATCH
         else:
             if isinstance(batch, float) and batch.is_integer():
                 train_batch = int(batch)
             else:
                 train_batch = batch
     else:
-        train_batch = 0
+        train_batch = DEFAULT_BATCH
 
     if log_path:
         _log(log_path, f"Starting model.train() with batch={train_batch}, device={device or 'auto'}")
 
     # 准备训练参数
+    # Windows平台必须设置workers=0，否则多进程数据加载器会死锁
+    import sys
+    num_workers = 0 if sys.platform == 'win32' else 8
+
     train_kwargs = {
         'data': data_yaml,
         'epochs': epochs,
@@ -274,13 +322,27 @@ def _train_with_ultralytics(yolo_model: str, data_yaml: str, out_dir: str, epoch
         'project': out_dir,
         'name': "train",
         'exist_ok': True,
+        'verbose': True,
+        'workers': num_workers,
+        'deterministic': False,  # Windows下deterministic模式可能导致阻塞
+        'amp': False,  # 禁用混合精度，避免Windows兼容性问题
     }
 
     # 添加device参数（支持多GPU）
     if device:
         train_kwargs['device'] = device
 
-    results = model.train(**train_kwargs)
+    if log_path:
+        _log(log_path, f"Training kwargs: {train_kwargs}")
+
+    try:
+        results = model.train(**train_kwargs)
+    except Exception as train_error:
+        if log_path:
+            import traceback
+            _log(log_path, f"Training error: {type(train_error).__name__}: {train_error}")
+            _log(log_path, f"Traceback:\n{traceback.format_exc()}")
+        raise
 
     if log_path:
         _log(log_path, "model.train() completed, extracting metrics...")
@@ -431,10 +493,11 @@ def run_training_job(job_id: int):
         except Exception:
             size = None
         rel = os.path.relpath(best_pt, os.getcwd())
+        artifact_path = rel
         with get_session() as session:
-            session.add(ModelArtifact(trainingJobId=job_id, format='pt', path=rel, size=size))
+            session.add(ModelArtifact(trainingJobId=job_id, format='pt', path=artifact_path, size=size))
             session.commit()
-        _log(log_path, f"Saved best weights {rel}")
+        _log(log_path, f"Saved best weights {artifact_path}")
 
     # Export ONNX (prefer best weights path when available)
     onnx_path = _export_onnx(best_pt or mdl, out_dir, 12, True)
@@ -444,10 +507,11 @@ def run_training_job(job_id: int):
         except Exception:
             size = None
         rel = os.path.relpath(onnx_path, os.getcwd())
+        artifact_path = rel
         with get_session() as session:
-            session.add(ModelArtifact(trainingJobId=job_id, format='onnx', path=rel, size=size))
+            session.add(ModelArtifact(trainingJobId=job_id, format='onnx', path=artifact_path, size=size))
             session.commit()
-        _log(log_path, f"Exported ONNX {rel}")
+        _log(log_path, f"Exported ONNX {artifact_path}")
 
     with get_session() as session:
         job = session.get(TrainingJob, job_id)
@@ -470,7 +534,6 @@ def start_training_async(job_id: int):
     import subprocess
     import sys
 
-    # Import DB_PATH inside function to avoid circular import issues
     from ..db import DB_PATH
 
     # Get the Python executable from current environment
@@ -494,11 +557,15 @@ def start_training_async(job_id: int):
     # Set environment variable to ensure subprocess uses same database
     env = os.environ.copy()
     env['APP_DB_PATH'] = str(DB_PATH)
+    # 跳过Polars CPU检查，避免兼容性问题
+    env['POLARS_SKIP_CPU_CHECK'] = '1'
+    # 禁用Python输出缓冲，避免I/O阻塞
+    env['PYTHONUNBUFFERED'] = '1'
 
     # Open log file for the process (keep it open for subprocess)
     log_f = open(process_log, 'w', encoding='utf-8', buffering=1)  # Line buffering
     log_f.write(f"Starting training job {job_id} at {__import__('datetime').datetime.now()}\n")
-    log_f.write(f"Database path: {DB_PATH}\n")
+    log_f.write(f"Database: sqlite:///{DB_PATH}\n")
     log_f.write(f"Working directory: {backend_dir}\n")
     log_f.flush()
 

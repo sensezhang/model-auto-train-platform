@@ -39,6 +39,24 @@ class ProjectCreate(BaseModel):
 @router.on_event("startup")
 def _init():
     init_db()
+    _recover_stale_jobs()
+
+
+def _recover_stale_jobs():
+    """服务启动时，将上次异常退出遗留的 running 任务标记为 failed"""
+    from datetime import datetime
+    from ..models import TrainingJob, AutoLabelJob, ImportJob
+    with get_session() as session:
+        for model_cls in (TrainingJob, AutoLabelJob, ImportJob):
+            stale = session.query(model_cls).filter(model_cls.status == 'running').all()
+            for job in stale:
+                job.status = 'failed'
+                if hasattr(job, 'finishedAt'):
+                    job.finishedAt = datetime.utcnow()
+                if hasattr(job, 'message'):
+                    job.message = '服务重启时进程已中断'
+                session.add(job)
+        session.commit()
 
 
 @router.post("/projects", response_model=Project)
@@ -69,6 +87,29 @@ def get_project(project_id: int):
         proj = session.get(Project, project_id)
         if not proj:
             raise HTTPException(404, "Project not found")
+        return proj
+
+
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+@router.patch("/projects/{project_id}", response_model=Project)
+def update_project(project_id: int, body: ProjectUpdate):
+    with get_session() as session:
+        proj = session.get(Project, project_id)
+        if not proj:
+            raise HTTPException(404, "Project not found")
+        if body.name is not None:
+            if not body.name.strip():
+                raise HTTPException(400, "项目名称不能为空")
+            proj.name = body.name.strip()
+        if body.description is not None:
+            proj.description = body.description
+        session.add(proj)
+        session.commit()
+        session.refresh(proj)
         return proj
 
 
@@ -543,6 +584,7 @@ def generate_thumbnails(project_id: int, background_tasks: BackgroundTasks):
 def run_generate_thumbnails(project_id: int):
     """后台任务：为项目图片生成缩略图"""
     import os
+    from ..utils.oss_storage import resolve_local_path, get_basename
 
     with get_session() as session:
         images = (
@@ -558,13 +600,13 @@ def run_generate_thumbnails(project_id: int):
 
         for i, img in enumerate(images):
             try:
-                original_path = os.path.join(os.getcwd(), img.path)
-                if not os.path.exists(original_path):
-                    print(f"[Thumbnail] 文件不存在: {original_path}")
+                original_path = resolve_local_path(img.path)
+                if not original_path:
+                    print(f"[Thumbnail] 文件无法定位: {img.path}")
                     failed += 1
                     continue
 
-                filename = os.path.basename(img.path)
+                filename = get_basename(img.path)
                 thumb_filename = os.path.splitext(filename)[0] + ".jpg"
 
                 thumb_path, display_path = generate_thumbnail_and_display(

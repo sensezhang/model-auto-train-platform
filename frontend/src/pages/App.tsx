@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Annotator } from './Annotator'
 import { Training } from './Training'
+import { Inference } from './Inference'
 import { ExportDialog } from '../components/ExportDialog'
 
-type Project = { id: number; name: string }
+type Project = { id: number; name: string; description?: string }
 
 type ImportResult = {
   total: number
@@ -44,6 +45,7 @@ export const App: React.FC = () => {
   const [exportDialogProject, setExportDialogProject] = useState<Project | null>(null)
   const [importDialogProject, setImportDialogProject] = useState<Project | null>(null)
   const [generatingThumbnails, setGeneratingThumbnails] = useState<number | null>(null)
+  const [editProject, setEditProject] = useState<Project | null>(null)
 
   const refresh = () => {
     fetch('/api/projects').then(r => r.json()).then(setProjects).catch(() => setProjects([]))
@@ -81,7 +83,7 @@ export const App: React.FC = () => {
     }
   }
 
-  const onImport = async (projectId: number, files: File[] | null, format: 'images' | 'yolo' | 'coco' | 'single' | 'folder' = 'images') => {
+  const onImport = async (projectId: number, files: File[] | null, format: 'images' | 'yolo' | 'coco' | 'single' | 'folder' | 'video' = 'images') => {
     if (!files || files.length === 0) return
 
     // 将文件转换为 Base64
@@ -230,6 +232,80 @@ export const App: React.FC = () => {
         setImportProgress(null)
       } finally {
         setImporting(null)
+      }
+      return
+    }
+
+    // 视频文件上传
+    if (format === 'video') {
+      const file = files[0]
+      const ext = file.name.toLowerCase().split('.').pop()
+      if (!['mp4', 'avi', 'mov', 'mkv', 'wmv', 'flv'].includes(ext || '')) {
+        alert('请上传视频文件（mp4/avi/mov/mkv/wmv/flv）')
+        return
+      }
+      setImporting(projectId)
+      setImportDialogProject(null)
+
+      const fd = new FormData()
+      fd.append('file', file)
+
+      try {
+        const res = await fetch(`/api/projects/${projectId}/import/video`, {
+          method: 'POST',
+          body: fd,
+        })
+        if (!res.ok) throw new Error('上传失败')
+        const data = await res.json()
+        const jobId = data.jobId
+
+        setImportProgress({
+          jobId,
+          projectId,
+          status: 'pending',
+          total: 0,
+          current: 0,
+          progress: 0,
+          message: '视频已上传，开始抽帧...'
+        })
+
+        const pollProgress = async () => {
+          try {
+            const progressRes = await fetch(`/api/projects/${projectId}/import/jobs/${jobId}`)
+            if (!progressRes.ok) return
+            const progressData = await progressRes.json()
+            const prog = progressData.total > 0 ? Math.round(progressData.current / progressData.total * 100) : 0
+            setImportProgress({
+              jobId,
+              projectId,
+              status: progressData.status,
+              total: progressData.total,
+              current: progressData.current,
+              progress: prog,
+              message: progressData.message,
+              imported: progressData.imported,
+              duplicates: progressData.duplicates,
+              errors: progressData.errors,
+            })
+            if (progressData.status === 'succeeded' || progressData.status === 'failed') {
+              setImporting(null)
+              if (progressData.status === 'failed') alert('抽帧失败: ' + progressData.message)
+              setTimeout(() => setImportProgress(null), 3000)
+              refresh()
+              return
+            }
+            setTimeout(pollProgress, 1000)
+          } catch (e) {
+            console.error('轮询进度失败:', e)
+            setTimeout(pollProgress, 2000)
+          }
+        }
+        pollProgress()
+      } catch (e) {
+        console.error(e)
+        alert('视频上传失败')
+        setImporting(null)
+        setImportProgress(null)
       }
       return
     }
@@ -389,7 +465,7 @@ export const App: React.FC = () => {
     // 仅兼容性：不使用真实路由器。保留。
   }
 
-  const [view, setView] = useState<'home'|'annotator'|'training'>('home')
+  const [view, setView] = useState<'home'|'annotator'|'training'|'inference'>('home')
   const [annotatorProjectId, setAnnotatorProjectId] = useState<number | null>(null)
 
   if (view === 'annotator' && annotatorProjectId != null) {
@@ -400,6 +476,10 @@ export const App: React.FC = () => {
     return <Training onBack={() => setView('home')} />
   }
 
+  if (view === 'inference') {
+    return <Inference onBack={() => setView('home')} />
+  }
+
   return (
     <div style={{ fontFamily: 'Inter, system-ui, Arial', padding: 16, maxWidth: 900, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -407,21 +487,38 @@ export const App: React.FC = () => {
           <h2>标注与训练平台</h2>
           <p>后端健康状态: {health}</p>
         </div>
-        <button
-          onClick={() => setView('training')}
-          style={{
-            padding: '12px 24px',
-            backgroundColor: '#52c41a',
-            color: 'white',
-            border: 'none',
-            borderRadius: 6,
-            cursor: 'pointer',
-            fontWeight: 500,
-            fontSize: 16
-          }}
-        >
-          🚀 训练中心
-        </button>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <button
+            onClick={() => setView('training')}
+            style={{
+              padding: '12px 24px',
+              backgroundColor: '#52c41a',
+              color: 'white',
+              border: 'none',
+              borderRadius: 6,
+              cursor: 'pointer',
+              fontWeight: 500,
+              fontSize: 16
+            }}
+          >
+            训练中心
+          </button>
+          <button
+            onClick={() => setView('inference')}
+            style={{
+              padding: '12px 24px',
+              backgroundColor: '#722ed1',
+              color: 'white',
+              border: 'none',
+              borderRadius: 6,
+              cursor: 'pointer',
+              fontWeight: 500,
+              fontSize: 16
+            }}
+          >
+            推理验证
+          </button>
+        </div>
       </div>
 
       <section style={{ marginTop: 24, padding: 16, border: '1px solid #eee', borderRadius: 8 }}>
@@ -460,6 +557,12 @@ export const App: React.FC = () => {
                   </div>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                     <button onClick={() => { setAnnotatorProjectId(p.id); setView('annotator') }} style={{ padding: '6px 10px' }}>打开标注工作台</button>
+                    <button
+                      onClick={() => setEditProject(p)}
+                      style={{ padding: '6px 10px', backgroundColor: '#fa8c16', color: 'white', border: '1px solid #fa8c16', borderRadius: 6, cursor: 'pointer' }}
+                    >
+                      编辑项目
+                    </button>
                     <button
                       onClick={() => onExport(p)}
                       disabled={exporting === p.id}
@@ -562,6 +665,181 @@ export const App: React.FC = () => {
           onImport={(files, format) => onImport(importDialogProject.id, files, format)}
         />
       )}
+
+      {/* 编辑项目对话框 */}
+      {editProject && (
+        <EditProjectDialog
+          project={editProject}
+          onClose={() => setEditProject(null)}
+          onSaved={(updated) => {
+            setEditProject(null)
+            setProjects(prev => prev.map(p => p.id === updated.id ? updated : p))
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// 编辑项目对话框组件
+const EditProjectDialog: React.FC<{
+  project: Project
+  onClose: () => void
+  onSaved: (updated: Project) => void
+}> = ({ project, onClose, onSaved }) => {
+  const [name, setName] = useState(project.name)
+  const [description, setDescription] = useState(project.description || '')
+  const [classes, setClasses] = useState<{ id: number; name: string; color?: string }[]>([])
+  const [newClassName, setNewClassName] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [addingClass, setAddingClass] = useState(false)
+
+  useEffect(() => {
+    fetch(`/api/projects/${project.id}/classes`)
+      .then(r => r.json())
+      .then(setClasses)
+      .catch(() => setClasses([]))
+  }, [project.id])
+
+  const onSave = async () => {
+    if (!name.trim()) { alert('项目名称不能为空'); return }
+    setSaving(true)
+    try {
+      const res = await fetch(`/api/projects/${project.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), description }),
+      })
+      if (!res.ok) throw new Error('保存失败')
+      const updated = await res.json()
+      onSaved(updated)
+    } catch (e) {
+      console.error(e)
+      alert('保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const onAddClass = async () => {
+    if (!newClassName.trim()) return
+    setAddingClass(true)
+    try {
+      const res = await fetch(`/api/projects/${project.id}/classes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newClassName.trim() }),
+      })
+      if (!res.ok) throw new Error('添加类别失败')
+      const cls = await res.json()
+      setClasses(prev => [...prev, cls])
+      setNewClassName('')
+    } catch (e) {
+      console.error(e)
+      alert('添加类别失败')
+    } finally {
+      setAddingClass(false)
+    }
+  }
+
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+      backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex',
+      alignItems: 'center', justifyContent: 'center', zIndex: 1000
+    }}>
+      <div style={{
+        backgroundColor: 'white', borderRadius: 8, padding: 24,
+        width: 480, boxShadow: '0 4px 12px rgba(0,0,0,0.15)', maxHeight: '80vh',
+        display: 'flex', flexDirection: 'column'
+      }}>
+        <h3 style={{ marginTop: 0, marginBottom: 16 }}>编辑项目</h3>
+
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ display: 'block', fontWeight: 500, marginBottom: 4 }}>项目名称</label>
+          <input
+            value={name}
+            onChange={e => setName(e.target.value)}
+            style={{ width: '100%', padding: 8, boxSizing: 'border-box', border: '1px solid #d9d9d9', borderRadius: 4 }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: 'block', fontWeight: 500, marginBottom: 4 }}>项目描述</label>
+          <textarea
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            rows={2}
+            style={{ width: '100%', padding: 8, boxSizing: 'border-box', border: '1px solid #d9d9d9', borderRadius: 4, resize: 'vertical' }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontWeight: 500, marginBottom: 8 }}>类别列表（只可添加，不可删除）</div>
+          <div style={{ maxHeight: 160, overflowY: 'auto', border: '1px solid #f0f0f0', borderRadius: 4, padding: 8 }}>
+            {classes.length === 0 ? (
+              <div style={{ color: '#999', fontSize: 13 }}>暂无类别</div>
+            ) : (
+              classes.map((cls, i) => (
+                <div key={cls.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0',
+                  borderBottom: i < classes.length - 1 ? '1px solid #f0f0f0' : 'none'
+                }}>
+                  {cls.color && (
+                    <span style={{
+                      display: 'inline-block', width: 12, height: 12,
+                      borderRadius: 2, backgroundColor: cls.color, flexShrink: 0
+                    }} />
+                  )}
+                  <span style={{ fontSize: 14 }}>{cls.name}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+          <input
+            placeholder="新类别名称"
+            value={newClassName}
+            onChange={e => setNewClassName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') onAddClass() }}
+            style={{ flex: 1, padding: 8, border: '1px solid #d9d9d9', borderRadius: 4 }}
+          />
+          <button
+            onClick={onAddClass}
+            disabled={addingClass || !newClassName.trim()}
+            style={{
+              padding: '8px 14px', backgroundColor: '#1890ff', color: 'white',
+              border: 'none', borderRadius: 4,
+              cursor: addingClass || !newClassName.trim() ? 'not-allowed' : 'pointer',
+              opacity: addingClass || !newClassName.trim() ? 0.6 : 1
+            }}
+          >
+            {addingClass ? '添加中...' : '添加类别'}
+          </button>
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 'auto' }}>
+          <button
+            onClick={onClose}
+            style={{ padding: '8px 16px', border: '1px solid #d9d9d9', borderRadius: 4, backgroundColor: 'white', cursor: 'pointer' }}
+          >
+            取消
+          </button>
+          <button
+            onClick={onSave}
+            disabled={saving}
+            style={{
+              padding: '8px 16px', border: 'none', borderRadius: 4,
+              backgroundColor: '#fa8c16', color: 'white',
+              cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.7 : 1
+            }}
+          >
+            {saving ? '保存中...' : '保存'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -571,11 +849,12 @@ const ImportDialog: React.FC<{
   projectId: number
   projectName: string
   onClose: () => void
-  onImport: (files: File[], format: 'images' | 'yolo' | 'coco' | 'single' | 'folder') => void
+  onImport: (files: File[], format: 'images' | 'yolo' | 'coco' | 'single' | 'folder' | 'video') => void
 }> = ({ projectId, projectName, onClose, onImport }) => {
-  const [format, setFormat] = useState<'images' | 'yolo' | 'coco' | 'single' | 'folder'>('folder')
+  const [format, setFormat] = useState<'images' | 'yolo' | 'coco' | 'single' | 'folder' | 'video'>('folder')
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const folderInputRef = React.useRef<HTMLInputElement>(null)
+  const videoInputRef = React.useRef<HTMLInputElement>(null)
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
@@ -587,15 +866,16 @@ const ImportDialog: React.FC<{
   const handleButtonClick = () => {
     if (format === 'folder') {
       folderInputRef.current?.click()
+    } else if (format === 'video') {
+      videoInputRef.current?.click()
     } else {
       fileInputRef.current?.click()
     }
   }
 
   const getAcceptTypes = () => {
-    if (format === 'single' || format === 'folder') {
-      return '.jpg,.jpeg,.png'
-    }
+    if (format === 'single' || format === 'folder') return '.jpg,.jpeg,.png'
+    if (format === 'video') return '.mp4,.avi,.mov,.mkv,.wmv,.flv'
     return '.zip'
   }
 
@@ -603,6 +883,7 @@ const ImportDialog: React.FC<{
     switch (format) {
       case 'single': return '选择图片'
       case 'folder': return '选择文件夹'
+      case 'video': return '选择视频文件'
       default: return '选择ZIP文件'
     }
   }
@@ -746,6 +1027,7 @@ const ImportDialog: React.FC<{
             border: format === 'images' ? '2px solid #1890ff' : '1px solid #d9d9d9',
             borderRadius: 6,
             cursor: 'pointer',
+            marginBottom: 8,
             backgroundColor: format === 'images' ? '#e6f7ff' : 'white'
           }}>
             <input
@@ -760,6 +1042,32 @@ const ImportDialog: React.FC<{
               <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
                 仅包含图片文件的ZIP压缩包，不包含标注。
                 导入后需要手动标注。
+              </div>
+            </div>
+          </label>
+
+          <label style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 8,
+            padding: 12,
+            border: format === 'video' ? '2px solid #1890ff' : '1px solid #d9d9d9',
+            borderRadius: 6,
+            cursor: 'pointer',
+            backgroundColor: format === 'video' ? '#e6f7ff' : 'white'
+          }}>
+            <input
+              type="radio"
+              name="format"
+              checked={format === 'video'}
+              onChange={() => setFormat('video')}
+              style={{ marginTop: 2 }}
+            />
+            <div>
+              <div style={{ fontWeight: 500 }}>视频文件（自动抽帧）</div>
+              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+                上传 mp4/avi/mov/mkv 等视频，后台自动按 1fps 抽取帧图片。
+                适合快速从视频中批量采集数据。
               </div>
             </div>
           </label>
@@ -781,6 +1089,15 @@ const ImportDialog: React.FC<{
           accept=".jpg,.jpeg,.png"
           multiple
           {...{ webkitdirectory: '', directory: '' } as any}
+          style={{ display: 'none' }}
+          onChange={handleFileSelect}
+        />
+
+        {/* 视频文件选择 */}
+        <input
+          ref={videoInputRef}
+          type="file"
+          accept=".mp4,.avi,.mov,.mkv,.wmv,.flv"
           style={{ display: 'none' }}
           onChange={handleFileSelect}
         />

@@ -386,16 +386,18 @@ async def import_yolo_dataset(
                     ext = os.path.splitext(base_name)[1]
                     dest_path = safe_join(images_dir, f"{checksum}{ext}")
 
-                # 保存图片
+                # 保存图片到本地
                 with open(dest_path, 'wb') as f:
                     f.write(image_data)
 
+                rel_path = os.path.relpath(dest_path, os.getcwd()).replace("\\", "/")
+                final_path = rel_path
+
                 # 写入数据库
-                rel_path = os.path.relpath(dest_path, os.getcwd())
                 with get_session() as session:
                     db_img = DBImage(
                         projectId=project_id,
-                        path=rel_path,
+                        path=final_path,
                         width=width,
                         height=height,
                         checksum=checksum,

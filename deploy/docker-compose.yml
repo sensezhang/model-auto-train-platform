@@ -1,0 +1,70 @@
+# YOLO/RF-DETR 训练标注平台 - Docker Compose 配置
+# 支持 GPU 训练
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    image: hub.ikingtec.com/ai/yolo-backend:v1
+    container_name: yolo-backend
+    restart: unless-stopped
+    shm_size: '8gb'
+    env_file:
+      - .env
+    volumes:
+      # ── 训练数据盘（挂载到服务器 /mnt/data，详见 README.md）─────────────
+      # 上传的图片
+      - /mnt/data/datasets:/app/datasets
+      # COCO 格式中间数据集（训练时自动生成，占用空间较大）
+      - /mnt/data/datasets_coco:/app/datasets_coco
+      # 训练输出：checkpoint、metrics、log（核心产物）
+      - /mnt/data/models:/app/models
+      # 导出的数据集（YOLO/COCO 格式）
+      - /mnt/data/output:/app/output
+      # 训练日志
+      - /mnt/data/logs:/app/logs
+      # ── 模型缓存（避免重复下载）──────────────────────────────────────────
+      # RF-DETR 预训练权重（手动拷贝，详见 README.md）
+      - /mnt/data/pretrained:/app/pretrained
+      # HuggingFace 缓存（DINOv2 backbone 等）
+      - /mnt/data/pretrained:/root/.cache/huggingface/hub
+      # PyTorch 模型缓存
+      - /mnt/data/.torch:/app/.torch
+      # Ultralytics (YOLO) 权重缓存
+      - /mnt/data/.ultralytics:/app/.ultralytics
+      # SQLite 数据库（持久化，升级容器不丢数据）
+      - /mnt/data/db:/app/db
+    environment:
+      - TZ=Asia/Shanghai
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - APP_DB_PATH=/app/db/app.db
+    networks:
+      - yolo-network
+    # GPU 支持 - 需要 NVIDIA Container Toolkit
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.frontend
+    image: hub.ikingtec.com/ai/yolo-frontend:v1
+    container_name: yolo-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - yolo-network
+
+networks:
+  yolo-network:
+    driver: bridge

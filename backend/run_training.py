@@ -3,6 +3,26 @@ import sys
 import os
 import traceback
 
+# 设置环境变量，必须在导入任何库之前设置
+os.environ['PYTHONUNBUFFERED'] = '1'  # 禁用输出缓冲
+
+# 加载 .env 文件（子进程可能没有继承完整的环境变量）
+try:
+    from dotenv import load_dotenv
+    _env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.isfile(_env_file):
+        load_dotenv(_env_file, override=False)  # 不覆盖父进程传入的环境变量
+except ImportError:
+    pass
+
+# Windows multiprocessing 修复 - 必须在导入torch/ultralytics之前设置
+import multiprocessing
+if sys.platform == 'win32':
+    try:
+        multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # 已经设置过了
+
 # 确保能导入 app 模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

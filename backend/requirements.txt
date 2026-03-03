@@ -1,20 +1,37 @@
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-sqlmodel==0.0.21
-pydantic==2.7.4
-python-multipart==0.0.9
-Jinja2==3.1.4
-Pillow==10.4.0
+# FastAPI 核心
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+sqlmodel>=0.0.21
+pydantic>=2.7.0
+python-multipart>=0.0.9
+Jinja2>=3.1.0
+Pillow>=10.0.0
+
+# YOLO 训练
 ultralytics>=8.2.0
-# ONNX 导出依赖（版本锁定，避免冲突）
-onnx==1.17.0
-onnxsim>=0.4.0
-onnx_graphsurgeon==0.5.2
-# PyTorch with CUDA 11.8 support
-# Install with: pip install torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cu118
-torch==2.0.1
-torchvision==0.15.2
-numpy<2.0
-opencv-python<4.10
-transformers>=4.40,<4.50
-peft>=0.10,<0.12
+
+# polars (ultralytics依赖) - 必须用rtcompat版本，标准版使用AVX-512指令在消费级Intel CPU上崩溃
+polars[rtcompat]>=1.38.0
+
+# ONNX 导出
+onnx>=1.18.0
+
+# PyTorch (Python 3.13 需要最新版本)
+# GPU 版本安装: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+torch>=2.5.0
+torchvision>=0.20.0
+
+# 数据处理
+numpy>=2.0.0
+opencv-python>=4.10.0
+imageio-ffmpeg>=0.4.9
+
+# Transformers
+transformers>=4.40.0
+peft>=0.10.0
+
+# 自动标注视觉大模型（OpenAI 兼容接口，支持自部署模型）
+openai>=1.0.0
+
+# 环境变量文件加载（.env 支持）
+python-dotenv>=1.0.0
