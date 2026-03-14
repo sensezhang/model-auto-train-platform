@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==========================================
-#  YOLO Platform - Server Build & Push
+#  Model Auto Train Platform - Server Build & Push
 #  用法: ./build-push.sh [版本号]
 #  示例: ./build-push.sh v2
 # ==========================================
@@ -8,15 +8,15 @@ set -e
 
 VERSION=${1:-v1}
 REGISTRY="hub.ikingtec.com/ai"
-BACKEND_IMAGE="$REGISTRY/yolo-backend:$VERSION"
-FRONTEND_IMAGE="$REGISTRY/yolo-frontend:$VERSION"
+BACKEND_IMAGE="$REGISTRY/model-train-backend:$VERSION"
+FRONTEND_IMAGE="$REGISTRY/model-train-frontend:$VERSION"
 
 # 脚本所在目录的上一级即项目根目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "=========================================="
-echo "  YOLO Platform - Build and Push Images"
+echo "  Model Auto Train Platform - Build and Push Images"
 echo "=========================================="
 echo ""
 echo "Registry : $REGISTRY"
@@ -65,7 +65,7 @@ echo "  $BACKEND_IMAGE"
 echo "  $FRONTEND_IMAGE"
 echo ""
 echo "Deploy on target server:"
-echo "  cd /opt/yolo-train-test/deploy"
+echo "  cd /opt/model-auto-train-platform/deploy"
 echo "  docker compose pull"
 echo "  docker compose up -d"
 echo "=========================================="

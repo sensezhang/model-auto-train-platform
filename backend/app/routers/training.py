@@ -110,6 +110,22 @@ def cancel_training(job_id: int):
         return {"ok": True, "status": job.status}
 
 
+@router.delete("/training/jobs/{job_id}")
+def delete_training_job(job_id: int):
+    """删除已完成/失败/已取消的训练任务及其关联数据"""
+    with get_session() as session:
+        job = session.get(TrainingJob, job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        if job.status in ("pending", "running"):
+            raise HTTPException(400, "Cannot delete a pending or running job, cancel it first")
+        # 删除关联 artifacts
+        session.query(ModelArtifact).filter(ModelArtifact.trainingJobId == job_id).delete()
+        session.delete(job)
+        session.commit()
+        return {"ok": True}
+
+
 @router.post("/training/jobs/cleanup-stuck")
 def cleanup_stuck_jobs():
     """清理卡住的训练任务（状态为 pending 或 running 但实际已停止的任务）"""

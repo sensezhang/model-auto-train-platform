@@ -1,5 +1,5 @@
 {
-  "name": "auto-train-platform",
+  "name": "model-auto-train-platform",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.1.0",
+    "antd": "^6.3.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "recharts": "^3.6.0"

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import List, Optional
+from datetime import datetime
 
 from ..db import get_session
 from ..models import Image, Project, Annotation, ProposedAnnotation
@@ -41,6 +42,8 @@ def list_images(
     project_id: int,
     status: Optional[str] = Query(default=None),
     labeled: Optional[bool] = Query(default=None),
+    date_from: Optional[str] = Query(default=None, description="上传时间起始（ISO 格式，含）"),
+    date_to: Optional[str] = Query(default=None, description="上传时间截止（ISO 格式，含）"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200)
 ):
@@ -51,6 +54,8 @@ def list_images(
         project_id: 项目ID
         status: 状态过滤 (unannotated/ai_pending/annotated)
         labeled: 完成状态过滤 (true=已完成, false=未完成)
+        date_from: 上传时间起始（ISO 格式，如 2024-01-01T00:00:00）
+        date_to: 上传时间截止（ISO 格式，如 2024-12-31T23:59:59）
         page: 页码，从1开始
         page_size: 每页数量，默认50，最大200
     """
@@ -64,10 +69,23 @@ def list_images(
             q = q.filter(Image.status == status)
         if labeled is not None:
             q = q.filter(Image.labeled == labeled)
+        if date_from:
+            try:
+                df = datetime.fromisoformat(date_from.replace('Z', '').replace('+00:00', ''))
+                q = q.filter(Image.createdAt >= df)
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                dt = datetime.fromisoformat(date_to.replace('Z', '').replace('+00:00', ''))
+                q = q.filter(Image.createdAt <= dt)
+            except ValueError:
+                pass
 
         total = q.count()
         offset = (page - 1) * page_size
-        items = q.order_by(Image.id).offset(offset).limit(page_size).all()
+        # 按上传时间倒序（最新在前）
+        items = q.order_by(Image.createdAt.desc()).offset(offset).limit(page_size).all()
         has_more = offset + len(items) < total
 
         return PaginatedImages(

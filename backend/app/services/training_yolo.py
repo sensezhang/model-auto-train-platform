@@ -260,13 +260,34 @@ def _train_with_ultralytics(yolo_model: str, data_yaml: str, out_dir: str, epoch
             def on_fit_epoch_end(trainer):
                 try:
                     # Log validation metrics if available
+                    # 兼容 Ultralytics 新旧版本的 key 格式：
+                    #   旧版: metrics/mAP50
+                    #   新版: metrics/mAP50(B)
                     metrics = getattr(trainer, 'metrics', None)
                     if metrics:
-                        map50 = metrics.get('metrics/mAP50', None)
-                        map50_95 = metrics.get('metrics/mAP50-95', None)
+                        map50 = (
+                            metrics.get('metrics/mAP50(B)')
+                            or metrics.get('metrics/mAP50')
+                        )
+                        map50_95 = (
+                            metrics.get('metrics/mAP50-95(B)')
+                            or metrics.get('metrics/mAP50-95')
+                        )
+                        precision = (
+                            metrics.get('metrics/precision(B)')
+                            or metrics.get('metrics/precision')
+                        )
+                        recall = (
+                            metrics.get('metrics/recall(B)')
+                            or metrics.get('metrics/recall')
+                        )
                         if map50 is not None or map50_95 is not None:
-                            _log(log_path, f"  Validation: mAP50={map50:.4f if map50 else 'N/A'}, mAP50-95={map50_95:.4f if map50_95 else 'N/A'}")
-                except Exception as e:
+                            _log(log_path,
+                                 f"  Validation: mAP50={map50:.4f if map50 else 'N/A'}, "
+                                 f"mAP50-95={map50_95:.4f if map50_95 else 'N/A'}, "
+                                 f"precision={precision:.4f if precision else 'N/A'}, "
+                                 f"recall={recall:.4f if recall else 'N/A'}")
+                except Exception:
                     pass  # Silent fail for metrics logging
 
             model.add_callback('on_pretrain_routine_start', on_pretrain_routine_start)
@@ -306,33 +327,72 @@ def _train_with_ultralytics(yolo_model: str, data_yaml: str, out_dir: str, epoch
     else:
         train_batch = DEFAULT_BATCH
 
-    if log_path:
-        _log(log_path, f"Starting model.train() with batch={train_batch}, device={device or 'auto'}")
-
-    # 准备训练参数
-    # Windows平台必须设置workers=0，否则多进程数据加载器会死锁
     import sys
-    num_workers = 0 if sys.platform == 'win32' else 8
+    import socket
+
+    is_windows = sys.platform == 'win32'
+
+    # 判断是否多卡训练（device 形如 "0,1" 或 [0,1]）
+    num_gpus = 1
+    if device:
+        if isinstance(device, str) and ',' in device:
+            num_gpus = len([d.strip() for d in device.split(',') if d.strip()])
+        elif isinstance(device, (list, tuple)):
+            num_gpus = len(device)
+
+    is_multi_gpu = num_gpus > 1
+
+    # ── DDP 端口：动态分配，避免上次训练残留的 29500 端口冲突导致 NCCL 永久卡住 ──
+    if is_multi_gpu and not is_windows:
+        def _find_free_port() -> int:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(('', 0))
+                return s.getsockname()[1]
+
+        free_port = _find_free_port()
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = str(free_port)
+        # NCCL 超时设短一些（默认 1800s），避免无限等待
+        os.environ.setdefault('NCCL_TIMEOUT', '300')
+        if log_path:
+            _log(log_path, f"Multi-GPU DDP: MASTER_PORT={free_port}, num_gpus={num_gpus}")
+
+    # Windows：workers 必须为 0，否则多进程 DataLoader 死锁
+    # Linux 多卡：每个 GPU 进程各自创建 DataLoader，workers 不宜过大，避免 I/O 争抢
+    if is_windows:
+        num_workers = 0
+    elif is_multi_gpu:
+        num_workers = 4  # 多卡时每卡 4 个 worker，总 I/O 压力可控
+    else:
+        num_workers = 8
+
+    # AMP（混合精度）：
+    #   Windows：禁用，部分 CUDA + cuDNN 版本有兼容性问题
+    #   Linux 单/多卡：启用，速度提升 1.5-2x，显存占用减少
+    use_amp = not is_windows
 
     train_kwargs = {
-        'data': data_yaml,
-        'epochs': epochs,
-        'imgsz': imgsz,
-        'batch': train_batch,
-        'project': out_dir,
-        'name': "train",
-        'exist_ok': True,
-        'verbose': True,
-        'workers': num_workers,
-        'deterministic': False,  # Windows下deterministic模式可能导致阻塞
-        'amp': False,  # 禁用混合精度，避免Windows兼容性问题
+        'data':          data_yaml,
+        'epochs':        epochs,
+        'imgsz':         imgsz,
+        'batch':         train_batch,
+        'project':       out_dir,
+        'name':          "train",
+        'exist_ok':      True,
+        'verbose':       True,
+        'workers':       num_workers,
+        'deterministic': False,   # Windows 下 deterministic 模式可能导致阻塞
+        'amp':           use_amp,
     }
 
-    # 添加device参数（支持多GPU）
     if device:
         train_kwargs['device'] = device
 
     if log_path:
+        _log(log_path, f"Starting model.train() — "
+                       f"batch={train_batch}, device={device or 'auto'}, "
+                       f"amp={use_amp}, workers={num_workers}, multi_gpu={is_multi_gpu}")
         _log(log_path, f"Training kwargs: {train_kwargs}")
 
     try:
@@ -534,7 +594,7 @@ def start_training_async(job_id: int):
     import subprocess
     import sys
 
-    from ..db import DB_PATH
+    from ..db import DB_TYPE, DB_PATH, APP_DB_URL
 
     # Get the Python executable from current environment
     python_exe = sys.executable
@@ -556,7 +616,10 @@ def start_training_async(job_id: int):
 
     # Set environment variable to ensure subprocess uses same database
     env = os.environ.copy()
-    env['APP_DB_PATH'] = str(DB_PATH)
+    if DB_TYPE == "mysql":
+        env['APP_DB_URL'] = APP_DB_URL
+    else:
+        env['APP_DB_PATH'] = str(DB_PATH)
     # 跳过Polars CPU检查，避免兼容性问题
     env['POLARS_SKIP_CPU_CHECK'] = '1'
     # 禁用Python输出缓冲，避免I/O阻塞
@@ -565,7 +628,8 @@ def start_training_async(job_id: int):
     # Open log file for the process (keep it open for subprocess)
     log_f = open(process_log, 'w', encoding='utf-8', buffering=1)  # Line buffering
     log_f.write(f"Starting training job {job_id} at {__import__('datetime').datetime.now()}\n")
-    log_f.write(f"Database: sqlite:///{DB_PATH}\n")
+    db_info = APP_DB_URL if DB_TYPE == "mysql" else f"sqlite:///{DB_PATH}"
+    log_f.write(f"Database: {db_info}\n")
     log_f.write(f"Working directory: {backend_dir}\n")
     log_f.flush()
 

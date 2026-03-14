@@ -19,7 +19,6 @@ except ImportError:
 # ── 以下 import 才能正确读到 .env 中的环境变量 ─────────────────
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from .routers import projects, images, annotations, autolabel, training, export, system, inference, videos
 
@@ -47,15 +46,38 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        from .db import DB_TYPE, DB_PATH
+        from .db import DB_TYPE, DB_PATH, APP_DB_URL
+        from .utils.oss_storage import is_oss_enabled, _OSS_ENDPOINT, _OSS_BUCKET
         return {
             "status": "ok",
             "db_type": DB_TYPE,
-            "db_path": DB_PATH,
+            "db_path": DB_PATH if DB_TYPE == "sqlite" else None,
+            "db_host": APP_DB_URL.split("@")[-1] if APP_DB_URL else None,
+            "oss_enabled": is_oss_enabled(),
+            "oss_endpoint": _OSS_ENDPOINT if is_oss_enabled() else None,
+            "oss_bucket": _OSS_BUCKET if is_oss_enabled() else None,
         }
 
-    # 本地文件服务：挂载当前工作目录，供前端访问图片
-    app.mount("/files", StaticFiles(directory="."), name="files")
+    # ── 本地文件服务 ──────────────────────────────────────────────
+    # 当 path 已经是 OSS/HTTP URL 时（数据库存的是公网地址），302 重定向到原 URL；
+    # 否则按相对路径在当前工作目录查找本地文件。
+    @app.get("/files/{file_path:path}")
+    async def serve_file(file_path: str):
+        import urllib.parse
+        from fastapi.responses import RedirectResponse, FileResponse
+        from fastapi import HTTPException as _HTTPException
+
+        decoded = urllib.parse.unquote(file_path)
+
+        # OSS / 外部 URL → 直接重定向，避免 Windows 路径拼接错误
+        if decoded.startswith("http://") or decoded.startswith("https://"):
+            return RedirectResponse(url=decoded, status_code=302)
+
+        # 本地相对路径 → 拼接 CWD 后返回文件
+        local_path = os.path.join(os.getcwd(), decoded.replace("/", os.sep))
+        if not os.path.isfile(local_path):
+            raise _HTTPException(status_code=404, detail=f"File not found: {decoded}")
+        return FileResponse(local_path)
 
     return app
 

@@ -5,25 +5,29 @@ import os
 
 
 # ──────────────────────────────────────────────────────────────
-# 数据库配置（始终使用 SQLite，路径通过环境变量配置）
+# 数据库配置
 #
-# Docker 挂载示例：
-#   volumes:
-#     - /mnt/data/db:/app/db
-#   environment:
-#     - APP_DB_PATH=/app/db/app.db
+# MySQL（本地开发）：
+#   APP_DB_URL=mysql+pymysql://user:pass@host:3306/dbname
+#
+# SQLite（服务器 Docker，不设置 APP_DB_URL 时自动使用）：
+#   APP_DB_PATH=/app/db/app.db   （不设置则默认 app.db）
 # ──────────────────────────────────────────────────────────────
 
-DB_PATH = os.getenv("APP_DB_PATH", os.path.join(os.getcwd(), "app.db"))
+APP_DB_URL = os.getenv("APP_DB_URL")  # MySQL 连接串，设置后优先使用 MySQL
 
-# 确保数据库目录存在
-os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
-
-engine = create_engine(
-    f"sqlite:///{DB_PATH}",
-    connect_args={"check_same_thread": False},
-)
-DB_TYPE = "sqlite"
+if APP_DB_URL:
+    engine = create_engine(APP_DB_URL, pool_pre_ping=True)
+    DB_TYPE = "mysql"
+    DB_PATH = None
+else:
+    DB_PATH = os.getenv("APP_DB_PATH", os.path.join(os.getcwd(), "app.db"))
+    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
+    engine = create_engine(
+        f"sqlite:///{DB_PATH}",
+        connect_args={"check_same_thread": False},
+    )
+    DB_TYPE = "sqlite"
 
 
 def _run_sqlite_migrations():
@@ -52,7 +56,8 @@ def _run_sqlite_migrations():
 def init_db():
     """初始化数据库：建表 + 迁移补丁"""
     SQLModel.metadata.create_all(engine)
-    _run_sqlite_migrations()
+    if DB_TYPE == "sqlite":
+        _run_sqlite_migrations()
 
 
 @contextmanager

@@ -17,7 +17,9 @@ polars[rtcompat]>=1.38.0
 onnx>=1.18.0
 
 # PyTorch (Python 3.13 需要最新版本)
-# GPU 版本安装: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# GPU 版本安装 (CUDA 12.4, 支持驱动 >= 550): pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# GPU 版本安装 (CUDA 11.8, 支持旧驱动):      pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# 注意: 直接 pip install torch 会安装 CPU 版本，需使用上面带 --index-url 的命令
 torch>=2.5.0
 torchvision>=0.20.0
 
@@ -35,3 +37,10 @@ openai>=1.0.0
 
 # 环境变量文件加载（.env 支持）
 python-dotenv>=1.0.0
+
+# MySQL 支持（可选，设置 APP_DB_URL 时需要）
+pymysql>=1.1.0
+cryptography>=42.0.0
+
+# OSS 支持（可选，设置 OSS_ENDPOINT 等环境变量时需要）
+boto3>=1.34.0

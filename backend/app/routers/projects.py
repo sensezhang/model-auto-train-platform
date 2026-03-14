@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Query, BackgroundTasks
+from fastapi import APIRouter, HTTPException, UploadFile, File, Query, BackgroundTasks, Request
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -6,6 +6,7 @@ import asyncio
 import tempfile
 import shutil
 import os
+from sqlalchemy import func
 
 from ..db import get_session, init_db
 from ..models import (
@@ -21,13 +22,34 @@ from ..models import (
     ActivityLog,
     ImportJob,
 )
-from ..utils.files import extract_images_from_zip, import_single_image, import_image_from_base64, generate_thumbnail_and_display
+from ..utils.files import extract_images_from_zip, extract_images_from_zip_sync_with_progress, import_single_image, import_image_from_base64, generate_thumbnail_and_display
 from ..utils.project_cleanup import remove_project_files
 from ..services.import_yolo import import_yolo_dataset
 from ..services.import_coco import import_coco_dataset
 
+# 上传临时文件优先写入已挂载的数据卷（/app/datasets → /mnt/data/datasets）
+# 避免大文件撑爆容器 overlay 文件系统的 /tmp
+_UPLOAD_TMP_DIR: str | None = "/app/datasets" if os.path.isdir("/app/datasets") else None
+
 
 router = APIRouter(tags=["projects"])
+
+
+class ClassInfo(BaseModel):
+    id: int
+    name: str
+    color: Optional[str] = None
+    hotkey: Optional[str] = None
+
+
+class ProjectResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    status: Optional[str] = None
+    createdAt: datetime
+    classes: List[ClassInfo] = []
+    imageCount: int = 0
 
 
 class ProjectCreate(BaseModel):
@@ -72,22 +94,46 @@ def create_project(body: ProjectCreate):
         return proj
 
 
-@router.get("/projects", response_model=List[Project])
+@router.get("/projects", response_model=List[ProjectResponse])
 def list_projects(includeDeleted: bool = Query(default=False)):
     with get_session() as session:
         q = session.query(Project)
         if not includeDeleted:
             q = q.filter(Project.status != "deleted")
-        return q.all()
+        projects = q.all()
+        result = []
+        for proj in projects:
+            count = session.query(func.count(Image.id)).filter(Image.projectId == proj.id).scalar() or 0
+            classes = session.query(Class).filter(Class.projectId == proj.id).all()
+            result.append(ProjectResponse(
+                id=proj.id,
+                name=proj.name,
+                description=proj.description,
+                status=proj.status,
+                createdAt=proj.createdAt,
+                classes=[ClassInfo(id=c.id, name=c.name, color=c.color, hotkey=c.hotkey) for c in classes],
+                imageCount=count,
+            ))
+        return result
 
 
-@router.get("/projects/{project_id}", response_model=Project)
+@router.get("/projects/{project_id}", response_model=ProjectResponse)
 def get_project(project_id: int):
     with get_session() as session:
         proj = session.get(Project, project_id)
         if not proj:
             raise HTTPException(404, "Project not found")
-        return proj
+        count = session.query(func.count(Image.id)).filter(Image.projectId == proj.id).scalar() or 0
+        classes = session.query(Class).filter(Class.projectId == proj.id).all()
+        return ProjectResponse(
+            id=proj.id,
+            name=proj.name,
+            description=proj.description,
+            status=proj.status,
+            createdAt=proj.createdAt,
+            classes=[ClassInfo(id=c.id, name=c.name, color=c.color, hotkey=c.hotkey) for c in classes],
+            imageCount=count,
+        )
 
 
 class ProjectUpdate(BaseModel):
@@ -130,24 +176,58 @@ class YoloImportSummary(BaseModel):
     class_mapping_found: bool
 
 
-@router.post("/projects/{project_id}/import", response_model=ImportSummary)
-async def import_zip(project_id: int, file: UploadFile = File(...)):
-    """导入普通图片zip包（仅图片，无标注）"""
-    if not file.filename or not file.filename.lower().endswith(".zip"):
-        raise HTTPException(400, "Please upload a .zip file")
-
+@router.post("/projects/{project_id}/import")
+async def import_zip(
+    project_id: int,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    filename: str = Query(default="upload.zip"),
+):
+    """导入普通图片zip包（仅图片，无标注），异步执行，返回任务ID。
+    文件以 application/octet-stream 直接流式发送，无 multipart 限制。"""
     with get_session() as session:
         proj = session.get(Project, project_id)
         if not proj:
             raise HTTPException(404, "Project not found")
 
-    try:
-        result = await extract_images_from_zip(project_id, file)
-    except Exception as e:
-        raise HTTPException(500, f"Import failed: {e}")
+        import_job = ImportJob(
+            projectId=project_id,
+            format="images",
+            status="pending",
+            message="准备导入...",
+        )
+        session.add(import_job)
+        session.commit()
+        session.refresh(import_job)
+        job_id = import_job.id
 
-    # 写入DB：已在工具函数中完成；这里只返回统计
-    return ImportSummary(**result)
+    # 直接从请求流读取，不经过 multipart 解析，支持任意大小
+    # 写入数据卷避免撑爆容器 /tmp（overlay 文件系统空间有限）
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", dir=_UPLOAD_TMP_DIR)
+    tmp_path = tmp.name
+    tmp.close()
+    print(f"[Images Import] Saving to {tmp_path} (tmp_dir={_UPLOAD_TMP_DIR})")
+    try:
+        total_size = 0
+        logged_mb = 0
+        with open(tmp_path, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+                total_size += len(chunk)
+                cur_256mb = total_size // (256 * 1024 * 1024)
+                if cur_256mb > logged_mb:
+                    logged_mb = cur_256mb
+                    print(f"[Images Import] Received {total_size / 1024 / 1024:.0f} MB...")
+        print(f"[Images Import] File saved ({filename}), size: {total_size / 1024 / 1024:.1f} MB")
+    except Exception as e:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise HTTPException(500, f"Failed to save uploaded file: {e}")
+
+    background_tasks.add_task(run_images_import_sync, job_id, project_id, tmp_path)
+    return {"job_id": job_id, "status": "pending", "message": "导入任务已创建"}
 
 
 class SingleImageImportResult(BaseModel):
@@ -199,26 +279,14 @@ def import_image_base64(project_id: int, body: Base64ImageImport):
 async def import_yolo_zip(
     project_id: int,
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    import_annotations: bool = Query(default=True, description="是否导入标注")
+    request: Request,
+    import_annotations: bool = Query(default=True, description="是否导入标注"),
+    filename: str = Query(default="upload.zip"),
 ):
     """
-    导入YOLO格式数据集zip包（异步，返回任务ID）
-
-    支持的结构:
-    - train/images/*.jpg + train/labels/*.txt
-    - valid/images/*.jpg + valid/labels/*.txt (可选)
-    - test/images/*.jpg + test/labels/*.txt (可选)
-    - data.yaml (包含类别映��)
-
-    类别映射规则:
-    - 根据data.yaml中的names与项目类别名称进行匹配（忽略大小写）
-    - 项目类别必须包含导入数据的所有类别
-    - 未匹配的类别标注将被跳过
+    导入YOLO格式数据集zip包（异步，返回任务ID）。
+    文件以 application/octet-stream 直接流式发送，无 multipart 限制。
     """
-    if not file.filename or not file.filename.lower().endswith(".zip"):
-        raise HTTPException(400, "Please upload a .zip file")
-
     with get_session() as session:
         proj = session.get(Project, project_id)
         if not proj:
@@ -236,13 +304,29 @@ async def import_yolo_zip(
         session.refresh(import_job)
         job_id = import_job.id
 
-    # 保存上传文件到临时位置
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    # 直接从请求流读取，不经过 multipart 解析，支持任意大小
+    # 写入数据卷避免撑爆容器 /tmp（overlay 文件系统空间有限）
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", dir=_UPLOAD_TMP_DIR)
+    tmp_path = tmp.name
+    tmp.close()
+    print(f"[YOLO Import] Saving to {tmp_path} (tmp_dir={_UPLOAD_TMP_DIR})")
     try:
-        shutil.copyfileobj(file.file, temp_file)
-        temp_file.close()
+        total_size = 0
+        logged_mb = 0
+        with open(tmp_path, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+                total_size += len(chunk)
+                cur_256mb = total_size // (256 * 1024 * 1024)
+                if cur_256mb > logged_mb:
+                    logged_mb = cur_256mb
+                    print(f"[YOLO Import] Received {total_size / 1024 / 1024:.0f} MB...")
+        print(f"[YOLO Import] File saved ({filename}), size: {total_size / 1024 / 1024:.1f} MB")
     except Exception as e:
-        os.unlink(temp_file.name)
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
         raise HTTPException(500, f"Failed to save uploaded file: {e}")
 
     # 在后台运行导入任务
@@ -250,7 +334,7 @@ async def import_yolo_zip(
         run_yolo_import_sync,
         job_id,
         project_id,
-        temp_file.name,
+        tmp_path,
         import_annotations
     )
 
@@ -261,7 +345,8 @@ async def import_yolo_zip(
 async def import_coco_zip(
     project_id: int,
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
+    request: Request,
+    filename: str = Query(default="upload.zip"),
 ):
     """
     导入COCO格式数据集zip包（异步，返回任务ID）
@@ -275,10 +360,7 @@ async def import_coco_zip(
     - 根据COCO JSON中的categories与项目类别名称进行匹配
     - 如果项目中不存在某个类别，会自动创建
     """
-    print(f"[COCO Import] Received file: {file.filename}, content_type: {file.content_type}")
-
-    if not file.filename or not file.filename.lower().endswith(".zip"):
-        raise HTTPException(400, "Please upload a .zip file")
+    print(f"[COCO Import] Received file: {filename}")
 
     with get_session() as session:
         proj = session.get(Project, project_id)
@@ -298,25 +380,26 @@ async def import_coco_zip(
         job_id = import_job.id
         print(f"[COCO Import] Created job {job_id} for project {project_id}")
 
-    # 保存上传文件到临时位置（流式写入，支持大文件）
-    temp_dir = tempfile.mkdtemp()
+    # 保存上传文件到临时位置（原始流写入，无 multipart 解析，支持超大文件）
+    # 写入数据卷避免撑爆容器 /tmp（overlay 文件系统空间有限）
+    temp_dir = tempfile.mkdtemp(dir=_UPLOAD_TMP_DIR)
     temp_file_path = os.path.join(temp_dir, "upload.zip")
 
     try:
-        print(f"[COCO Import] Saving file to {temp_file_path}")
-        # 使用流式写入，每次读取 8MB
-        chunk_size = 8 * 1024 * 1024  # 8MB chunks
+        print(f"[COCO Import] Saving file to {temp_file_path} (tmp_dir={_UPLOAD_TMP_DIR})")
         total_size = 0
+        logged_mb = 0
 
         with open(temp_file_path, "wb") as f:
-            while True:
-                chunk = await file.read(chunk_size)
-                if not chunk:
-                    break
+            async for chunk in request.stream():
                 f.write(chunk)
                 total_size += len(chunk)
+                cur_256mb = total_size // (256 * 1024 * 1024)
+                if cur_256mb > logged_mb:
+                    logged_mb = cur_256mb
+                    print(f"[COCO Import] Received {total_size / 1024 / 1024:.0f} MB...")
 
-        print(f"[COCO Import] File saved, total size: {total_size / 1024 / 1024:.2f} MB")
+        print(f"[COCO Import] File saved ({filename}), size: {total_size / 1024 / 1024:.1f} MB")
 
     except Exception as e:
         print(f"[COCO Import] Failed to save file: {e}")
@@ -334,6 +417,66 @@ async def import_coco_zip(
     )
 
     return {"job_id": job_id, "status": "pending", "message": "导入任务已创建"}
+
+
+def run_images_import_sync(job_id: int, project_id: int, temp_file_path: str):
+    """后台运行纯图片 ZIP 导入任务"""
+    try:
+        with get_session() as session:
+            job = session.get(ImportJob, job_id)
+            if job:
+                job.status = "running"
+                job.startedAt = datetime.utcnow()
+                job.message = "正在解析 ZIP 文件..."
+                session.commit()
+
+        def progress_callback(current: int, total: int, message: str):
+            try:
+                with get_session() as session:
+                    job = session.get(ImportJob, job_id)
+                    if job:
+                        job.current = current
+                        job.total = total
+                        job.message = message
+                        session.commit()
+            except Exception as e:
+                print(f"[Images Import Job {job_id}] Progress callback error: {e}")
+
+        result = extract_images_from_zip_sync_with_progress(
+            project_id, temp_file_path, progress_callback
+        )
+
+        with get_session() as session:
+            job = session.get(ImportJob, job_id)
+            if job:
+                job.status = "succeeded"
+                job.current = result["total"]
+                job.total = result["total"]
+                job.imported = result["imported"]
+                job.duplicates = result["duplicates"]
+                job.errors = result["errors"]
+                job.finishedAt = datetime.utcnow()
+                job.message = f"导入完成：{result['imported']} 张新增，{result['duplicates']} 张重复，{result['errors']} 张错误"
+                session.commit()
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        try:
+            with get_session() as session:
+                job = session.get(ImportJob, job_id)
+                if job:
+                    job.status = "failed"
+                    job.finishedAt = datetime.utcnow()
+                    job.message = f"导入失败：{str(e)}"
+                    session.commit()
+        except Exception:
+            pass
+    finally:
+        try:
+            os.unlink(temp_file_path)
+        except Exception:
+            pass
 
 
 def run_yolo_import_sync(job_id: int, project_id: int, temp_file_path: str, import_annotations: bool):

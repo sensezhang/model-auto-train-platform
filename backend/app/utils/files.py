@@ -57,7 +57,13 @@ def _rel(abs_path: str) -> str:
 
 
 def _to_storage_path(rel_path: str, local_abs_path: str) -> str:
-    """返回文件的相对路径（本地文件服务）"""
+    """如果 OSS 已启用，上传到 OSS 并返回 URL；否则返回本地相对路径"""
+    from ..utils.oss_storage import is_oss_enabled, upload_to_oss, normalize_key
+    if is_oss_enabled():
+        key = normalize_key(rel_path)
+        url = upload_to_oss(local_abs_path, key)
+        if url:
+            return url
     return rel_path
 
 
@@ -145,6 +151,90 @@ def read_image_size(data: bytes) -> Tuple[int, int]:
 # ──────────────────────────────────────────────────────────────
 # ZIP 批量导入
 # ──────────────────────────────────────────────────────────────
+
+def extract_images_from_zip_sync_with_progress(
+    project_id: int,
+    zip_path: str,
+    progress_callback=None
+) -> Dict[str, int]:
+    """从 ZIP 文件路径中提取图片，支持进度回调（同步版本，供后台任务使用）"""
+    total      = 0
+    imported   = 0
+    duplicates = 0
+    errors     = 0
+
+    images_dir = project_images_dir(project_id)
+
+    with zipfile.ZipFile(zip_path) as zf:
+        # 第一遍：统计图片总数
+        image_entries = [
+            info for info in zf.infolist()
+            if not info.is_dir()
+            and os.path.splitext(info.filename.lower())[1] in ALLOWED_EXTS
+        ]
+        total = len(image_entries)
+
+        if progress_callback:
+            progress_callback(0, total, f"共发现 {total} 张图片，开始导入...")
+
+        for i, info in enumerate(image_entries):
+            current = i + 1
+            dest_abs = None
+            try:
+                data = zf.read(info)
+                checksum = sha1_of_bytes(data)
+                ext = os.path.splitext(info.filename.lower())[1]
+
+                with get_session() as session:
+                    exists = (
+                        session.query(DBImage)
+                        .filter(DBImage.projectId == project_id, DBImage.checksum == checksum)
+                        .first()
+                    )
+                    if exists:
+                        duplicates += 1
+                        if progress_callback:
+                            progress_callback(current, total, f"正在导入 {current}/{total}...")
+                        continue
+
+                base_name = os.path.basename(info.filename) or (checksum + ext)
+                dest_abs  = safe_join(images_dir, base_name)
+                if os.path.exists(dest_abs):
+                    dest_abs = safe_join(images_dir, f"{checksum}{ext}")
+
+                with open(dest_abs, "wb") as f:
+                    f.write(data)
+                width, height = read_image_size(data)
+
+                dest_rel  = _rel(dest_abs)
+                img_path  = _to_storage_path(dest_rel, dest_abs)
+
+                with get_session() as session:
+                    db_img = DBImage(
+                        projectId=project_id,
+                        path=img_path,
+                        width=width,
+                        height=height,
+                        checksum=checksum,
+                        status="unannotated",
+                    )
+                    session.add(db_img)
+                    session.commit()
+
+                imported += 1
+            except Exception:
+                errors += 1
+                try:
+                    if dest_abs and os.path.exists(dest_abs):
+                        os.remove(dest_abs)
+                except Exception:
+                    pass
+
+            if progress_callback:
+                progress_callback(current, total, f"正在导入 {current}/{total}...")
+
+    return {"total": total, "imported": imported, "duplicates": duplicates, "errors": errors}
+
 
 async def extract_images_from_zip(project_id: int, upload_file) -> Dict[str, int]:
     total      = 0

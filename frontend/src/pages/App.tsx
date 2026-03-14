@@ -1,1135 +1,302 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Annotator } from './Annotator'
-import { Training } from './Training'
-import { Inference } from './Inference'
-import { ExportDialog } from '../components/ExportDialog'
+import React, { useEffect, useState } from 'react'
+import {
+  ConfigProvider,
+  Layout,
+  Button,
+  Card,
+  Row,
+  Col,
+  Tag,
+  Modal,
+  Form,
+  Input,
+  Empty,
+  Badge,
+  Space,
+  Typography,
+  Popconfirm,
+  message,
+  Tooltip,
+} from 'antd'
+import {
+  PlusOutlined,
+  FolderOutlined,
+  PictureOutlined,
+  DeleteOutlined,
+  ArrowRightOutlined,
+} from '@ant-design/icons'
+import { ProjectDetail } from './ProjectDetail'
 
-type Project = { id: number; name: string; description?: string }
+const { Header, Content } = Layout
+const { Title, Text } = Typography
 
-type ImportResult = {
-  total: number
-  imported: number
-  duplicates: number
-  errors: number
-  annotations_imported?: number
-  annotations_skipped?: number
-  class_mapping_found?: boolean
+export type ProjectClass = { id: number; name: string; color?: string }
+export type Project = {
+  id: number
+  name: string
+  description?: string
+  classes: ProjectClass[]
+  imageCount: number
 }
 
-type ImportProgress = {
-  jobId: number
-  projectId: number
-  status: string
-  total: number
-  current: number
-  progress: number
-  message: string
-  imported?: number
-  duplicates?: number
-  errors?: number
-  annotations_imported?: number
-  annotations_skipped?: number
-}
+// 类别颜色池
+const CLASS_COLORS = [
+  '#1677ff', '#52c41a', '#fa8c16', '#722ed1', '#eb2f96',
+  '#13c2c2', '#fadb14', '#f5222d', '#2f54eb', '#a0d911',
+]
+const getTagColor = (index: number) => CLASS_COLORS[index % CLASS_COLORS.length]
 
 export const App: React.FC = () => {
-  const [health, setHealth] = useState('unknown')
   const [projects, setProjects] = useState<Project[]>([])
+  const [loading, setLoading] = useState(false)
+  const [health, setHealth] = useState<'ok' | 'error' | 'unknown'>('unknown')
+  const [createOpen, setCreateOpen] = useState(false)
   const [creating, setCreating] = useState(false)
-  const [newName, setNewName] = useState('')
-  const [newClasses, setNewClasses] = useState('')
-  const [importing, setImporting] = useState<number | null>(null)
-  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
-  const [importResult, setImportResult] = useState<Record<number, ImportResult>>({})
-  const [deleting, setDeleting] = useState<number | null>(null)
-  const [exporting, setExporting] = useState<number | null>(null)
-  const [exportDialogProject, setExportDialogProject] = useState<Project | null>(null)
-  const [importDialogProject, setImportDialogProject] = useState<Project | null>(null)
-  const [generatingThumbnails, setGeneratingThumbnails] = useState<number | null>(null)
-  const [editProject, setEditProject] = useState<Project | null>(null)
+  const [currentProject, setCurrentProject] = useState<Project | null>(null)
+  const [form] = Form.useForm()
 
-  const refresh = () => {
-    fetch('/api/projects').then(r => r.json()).then(setProjects).catch(() => setProjects([]))
+  const refresh = async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/projects')
+      const data = await res.json()
+      setProjects(Array.isArray(data) ? data : [])
+    } catch {
+      setProjects([])
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
-    fetch('/api/health').then(r => r.json()).then(d => setHealth(d.status)).catch(() => setHealth('error'))
+    fetch('/api/health')
+      .then(r => r.json())
+      .then(d => setHealth(d.status === 'ok' ? 'ok' : 'error'))
+      .catch(() => setHealth('error'))
     refresh()
   }, [])
 
-  const onCreate = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!newName.trim()) return
-    setCreating(true)
+  const handleCreate = async () => {
     try {
+      const values = await form.validateFields()
+      setCreating(true)
       const body = {
-        name: newName.trim(),
+        name: values.name.trim(),
         description: '',
-        classes: newClasses.split(',').map(s => s.trim()).filter(Boolean),
+        classes: values.classes
+          ? values.classes.split(',').map((s: string) => s.trim()).filter(Boolean)
+          : [],
       }
       const res = await fetch('/api/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      if (!res.ok) throw new Error('创建项目失败')
-      setNewName('')
-      setNewClasses('')
+      if (!res.ok) throw new Error('创建失败')
+      message.success('项目创建成功')
+      form.resetFields()
+      setCreateOpen(false)
       refresh()
-    } catch (e) {
-      console.error(e)
-      alert('创建项目失败')
+    } catch (e: any) {
+      if (e?.errorFields) return // 表单校验失败
+      message.error(e.message || '创建项目失败')
     } finally {
       setCreating(false)
     }
   }
 
-  const onImport = async (projectId: number, files: File[] | null, format: 'images' | 'yolo' | 'coco' | 'single' | 'folder' | 'video' = 'images') => {
-    if (!files || files.length === 0) return
-
-    // 将文件转换为 Base64
-    const fileToBase64 = (file: File): Promise<string> => {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => resolve(reader.result as string)
-        reader.onerror = reject
-        reader.readAsDataURL(file)
-      })
-    }
-
-    // 单张图片上传
-    if (format === 'single') {
-      const file = files[0]
-      const ext = file.name.toLowerCase().split('.').pop()
-      if (!['jpg', 'jpeg', 'png'].includes(ext || '')) {
-        alert('请上传 JPG 或 PNG 图片')
-        return
-      }
-      setImporting(projectId)
-      setImportDialogProject(null)
-
-      try {
-        const base64Data = await fileToBase64(file)
-        const res = await fetch(`/api/projects/${projectId}/import/image-base64`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename: file.name, data: base64Data }),
-        })
-        const data = await res.json()
-        if (data.success) {
-          alert('导入成功')
-        } else if (data.duplicate) {
-          alert('图片已存在（重复）')
-        } else {
-          alert('导入失败: ' + data.message)
-        }
-        refresh()
-      } catch (e) {
-        console.error(e)
-        alert('导入失败')
-      } finally {
-        setImporting(null)
-      }
-      return
-    }
-
-    // 文件夹批量上传
-    if (format === 'folder') {
-      // 过滤出图片文件
-      const imageFiles = files.filter(file => {
-        const ext = file.name.toLowerCase().split('.').pop()
-        return ['jpg', 'jpeg', 'png'].includes(ext || '')
-      })
-
-      if (imageFiles.length === 0) {
-        alert('所选文件夹中没有找到 JPG/PNG 图片')
-        return
-      }
-
-      setImporting(projectId)
-      setImportDialogProject(null)
-      setImportProgress({
-        jobId: 0,
-        projectId,
-        status: 'running',
-        total: imageFiles.length,
-        current: 0,
-        progress: 0,
-        message: `正在导入 0/${imageFiles.length}...`
-      })
-
-      let imported = 0
-      let duplicates = 0
-      let errors = 0
-
-      try {
-        for (let i = 0; i < imageFiles.length; i++) {
-          const file = imageFiles[i]
-          try {
-            const base64Data = await fileToBase64(file)
-            const res = await fetch(`/api/projects/${projectId}/import/image-base64`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ filename: file.name, data: base64Data }),
-            })
-            const data = await res.json()
-            if (data.success) {
-              imported++
-            } else if (data.duplicate) {
-              duplicates++
-            } else {
-              errors++
-            }
-          } catch {
-            errors++
-          }
-
-          // 更新进度
-          const current = i + 1
-          setImportProgress({
-            jobId: 0,
-            projectId,
-            status: 'running',
-            total: imageFiles.length,
-            current,
-            progress: Math.round(current / imageFiles.length * 100),
-            message: `正在导入 ${current}/${imageFiles.length}...`,
-            imported,
-            duplicates,
-            errors,
-          })
-        }
-
-        // 完成
-        setImportProgress({
-          jobId: 0,
-          projectId,
-          status: 'succeeded',
-          total: imageFiles.length,
-          current: imageFiles.length,
-          progress: 100,
-          message: '导入完成',
-          imported,
-          duplicates,
-          errors,
-        })
-
-        setImportResult(prev => ({
-          ...prev,
-          [projectId]: {
-            total: imageFiles.length,
-            imported,
-            duplicates,
-            errors,
-          }
-        }))
-
-        // 3秒后清除进度显示
-        setTimeout(() => setImportProgress(null), 3000)
-        refresh()
-      } catch (e) {
-        console.error(e)
-        alert('导入失败')
-        setImportProgress(null)
-      } finally {
-        setImporting(null)
-      }
-      return
-    }
-
-    // 视频文件上传
-    if (format === 'video') {
-      const file = files[0]
-      const ext = file.name.toLowerCase().split('.').pop()
-      if (!['mp4', 'avi', 'mov', 'mkv', 'wmv', 'flv'].includes(ext || '')) {
-        alert('请上传视频文件（mp4/avi/mov/mkv/wmv/flv）')
-        return
-      }
-      setImporting(projectId)
-      setImportDialogProject(null)
-
-      const fd = new FormData()
-      fd.append('file', file)
-
-      try {
-        const res = await fetch(`/api/projects/${projectId}/import/video`, {
-          method: 'POST',
-          body: fd,
-        })
-        if (!res.ok) throw new Error('上传失败')
-        const data = await res.json()
-        const jobId = data.jobId
-
-        setImportProgress({
-          jobId,
-          projectId,
-          status: 'pending',
-          total: 0,
-          current: 0,
-          progress: 0,
-          message: '视频已上传，开始抽帧...'
-        })
-
-        const pollProgress = async () => {
-          try {
-            const progressRes = await fetch(`/api/projects/${projectId}/import/jobs/${jobId}`)
-            if (!progressRes.ok) return
-            const progressData = await progressRes.json()
-            const prog = progressData.total > 0 ? Math.round(progressData.current / progressData.total * 100) : 0
-            setImportProgress({
-              jobId,
-              projectId,
-              status: progressData.status,
-              total: progressData.total,
-              current: progressData.current,
-              progress: prog,
-              message: progressData.message,
-              imported: progressData.imported,
-              duplicates: progressData.duplicates,
-              errors: progressData.errors,
-            })
-            if (progressData.status === 'succeeded' || progressData.status === 'failed') {
-              setImporting(null)
-              if (progressData.status === 'failed') alert('抽帧失败: ' + progressData.message)
-              setTimeout(() => setImportProgress(null), 3000)
-              refresh()
-              return
-            }
-            setTimeout(pollProgress, 1000)
-          } catch (e) {
-            console.error('轮询进度失败:', e)
-            setTimeout(pollProgress, 2000)
-          }
-        }
-        pollProgress()
-      } catch (e) {
-        console.error(e)
-        alert('视频上传失败')
-        setImporting(null)
-        setImportProgress(null)
-      }
-      return
-    }
-
-    // ZIP 文件上传
-    const file = files[0]
-    if (!file.name.toLowerCase().endsWith('.zip')) {
-      alert('请上传zip文件')
-      return
-    }
-    setImporting(projectId)
-    setImportDialogProject(null)
-    setImportProgress(null)
-
-    try {
-      const fd = new FormData()
-      fd.append('file', file)
-
-      if (format === 'yolo' || format === 'coco') {
-        // YOLO/COCO格式使用异步导入，返回job_id后轮询进度
-        const endpoint = format === 'yolo'
-          ? `/api/projects/${projectId}/import/yolo?import_annotations=true`
-          : `/api/projects/${projectId}/import/coco`
-
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          body: fd,
-        })
-        if (!res.ok) throw new Error('导入失败')
-        const data = await res.json()
-        const jobId = data.job_id
-
-        // 开始轮询进度
-        setImportProgress({
-          jobId,
-          projectId,
-          status: 'pending',
-          total: 0,
-          current: 0,
-          progress: 0,
-          message: '准备导入...'
-        })
-
-        // 轮询直到完成
-        const pollProgress = async () => {
-          try {
-            const progressRes = await fetch(`/api/projects/${projectId}/import/jobs/${jobId}`)
-            if (!progressRes.ok) return
-
-            const progressData = await progressRes.json()
-            setImportProgress({
-              jobId,
-              projectId,
-              status: progressData.status,
-              total: progressData.total,
-              current: progressData.current,
-              progress: progressData.progress,
-              message: progressData.message,
-              imported: progressData.imported,
-              duplicates: progressData.duplicates,
-              errors: progressData.errors,
-              annotations_imported: progressData.annotations_imported,
-              annotations_skipped: progressData.annotations_skipped,
-            })
-
-            if (progressData.status === 'succeeded' || progressData.status === 'failed') {
-              // 导入完成
-              setImporting(null)
-              if (progressData.status === 'succeeded') {
-                setImportResult(prev => ({
-                  ...prev,
-                  [projectId]: {
-                    total: progressData.total,
-                    imported: progressData.imported,
-                    duplicates: progressData.duplicates,
-                    errors: progressData.errors,
-                    annotations_imported: progressData.annotations_imported,
-                    annotations_skipped: progressData.annotations_skipped,
-                  }
-                }))
-              } else {
-                alert('导入失败: ' + progressData.message)
-              }
-              // 3秒后清除进度显示
-              setTimeout(() => setImportProgress(null), 3000)
-              refresh()
-              return
-            }
-
-            // 继续轮询
-            setTimeout(pollProgress, 1000)
-          } catch (e) {
-            console.error('轮询进度失败:', e)
-            setTimeout(pollProgress, 2000)
-          }
-        }
-
-        pollProgress()
-      } else {
-        // 普通图片导入（同步）
-        const res = await fetch(`/api/projects/${projectId}/import`, {
-          method: 'POST',
-          body: fd,
-        })
-        if (!res.ok) throw new Error('导入失败')
-        const data = await res.json()
-        setImportResult(prev => ({ ...prev, [projectId]: data }))
-        setImporting(null)
-        refresh()
-      }
-    } catch (e) {
-      console.error(e)
-      alert('导入失败')
-      setImporting(null)
-      setImportProgress(null)
-    }
-  }
-
-  const onDeleteProject = async (projectId: number) => {
-    if (!confirm('确认删除该项目吗？将同时删除所有图片和标注数据，此操作不可恢复！')) return
-    setDeleting(projectId)
+  const handleDelete = async (projectId: number) => {
     try {
       const res = await fetch(`/api/projects/${projectId}`, { method: 'DELETE' })
       if (!res.ok) throw new Error('删除失败')
+      message.success('项目已删除')
       refresh()
-    } catch (e) {
-      console.error(e)
-      alert('删除失败')
-    } finally {
-      setDeleting(null)
+    } catch {
+      message.error('删除失败')
     }
   }
 
-  const onExport = (project: Project) => {
-    setExportDialogProject(project)
-  }
-
-  const onGenerateThumbnails = async (projectId: number) => {
-    setGeneratingThumbnails(projectId)
-    try {
-      const res = await fetch(`/api/projects/${projectId}/generate-thumbnails`, { method: 'POST' })
-      const data = await res.json()
-      if (data.status === 'started') {
-        alert(`开始生成缩略图：${data.total} 张图片，请稍等...`)
-      } else if (data.status === 'completed') {
-        alert(data.message)
-      }
-    } catch (e) {
-      console.error(e)
-      alert('生成缩略图失败')
-    } finally {
-      setGeneratingThumbnails(null)
-    }
-  }
-
-  if ((window as any).__view === 'annotator') {
-    // 仅兼容性：不使用真实路由器。保留。
-  }
-
-  const [view, setView] = useState<'home'|'annotator'|'training'|'inference'>('home')
-  const [annotatorProjectId, setAnnotatorProjectId] = useState<number | null>(null)
-
-  if (view === 'annotator' && annotatorProjectId != null) {
-    return <Annotator projectId={annotatorProjectId} onBack={() => setView('home')} />
-  }
-
-  if (view === 'training') {
-    return <Training onBack={() => setView('home')} />
-  }
-
-  if (view === 'inference') {
-    return <Inference onBack={() => setView('home')} />
+  // 进入项目详情
+  if (currentProject) {
+    return (
+      <ProjectDetail
+        project={currentProject}
+        onBack={() => {
+          setCurrentProject(null)
+          refresh()
+        }}
+        onProjectUpdated={(updated) => {
+          setCurrentProject(updated)
+          setProjects(prev => prev.map(p => p.id === updated.id ? updated : p))
+        }}
+      />
+    )
   }
 
   return (
-    <div style={{ fontFamily: 'Inter, system-ui, Arial', padding: 16, maxWidth: 900, margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <h2>标注与训练平台</h2>
-          <p>后端健康状态: {health}</p>
-        </div>
-        <div style={{ display: 'flex', gap: 12 }}>
-          <button
-            onClick={() => setView('training')}
-            style={{
-              padding: '12px 24px',
-              backgroundColor: '#52c41a',
-              color: 'white',
-              border: 'none',
-              borderRadius: 6,
-              cursor: 'pointer',
-              fontWeight: 500,
-              fontSize: 16
-            }}
-          >
-            训练中心
-          </button>
-          <button
-            onClick={() => setView('inference')}
-            style={{
-              padding: '12px 24px',
-              backgroundColor: '#722ed1',
-              color: 'white',
-              border: 'none',
-              borderRadius: 6,
-              cursor: 'pointer',
-              fontWeight: 500,
-              fontSize: 16
-            }}
-          >
-            推理验证
-          </button>
-        </div>
-      </div>
-
-      <section style={{ marginTop: 24, padding: 16, border: '1px solid #eee', borderRadius: 8 }}>
-        <h3>创建项目</h3>
-        <form onSubmit={onCreate} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input
-            placeholder="项目名称"
-            value={newName}
-            onChange={e => setNewName(e.target.value)}
-            style={{ padding: 8, flex: 1 }}
-          />
-          <input
-            placeholder="类别(以逗号分隔)"
-            value={newClasses}
-            onChange={e => setNewClasses(e.target.value)}
-            style={{ padding: 8, flex: 1 }}
-          />
-          <button disabled={creating} type="submit" style={{ padding: '8px 12px' }}>
-            {creating ? '创建中...' : '创建'}
-          </button>
-        </form>
-      </section>
-
-      <section style={{ marginTop: 24 }}>
-        <h3>项目列表</h3>
-        {projects.length === 0 ? (
-          <p>暂无项目，请先创建。</p>
-        ) : (
-          <ul style={{ listStyle: 'none', padding: 0, display: 'grid', gap: 12 }}>
-            {projects.map(p => (
-              <li key={p.id} style={{ border: '1px solid #eee', borderRadius: 8, padding: 12 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div>
-                    <strong>{p.name}</strong>
-                    <div style={{ color: '#666', fontSize: 12 }}>ID: {p.id}</div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <button onClick={() => { setAnnotatorProjectId(p.id); setView('annotator') }} style={{ padding: '6px 10px' }}>打开标注工作台</button>
-                    <button
-                      onClick={() => setEditProject(p)}
-                      style={{ padding: '6px 10px', backgroundColor: '#fa8c16', color: 'white', border: '1px solid #fa8c16', borderRadius: 6, cursor: 'pointer' }}
-                    >
-                      编辑项目
-                    </button>
-                    <button
-                      onClick={() => onExport(p)}
-                      disabled={exporting === p.id}
-                      style={{ padding: '6px 10px', backgroundColor: '#52c41a', color: 'white', border: '1px solid #52c41a', borderRadius: 6, cursor: exporting === p.id ? 'not-allowed' : 'pointer' }}
-                    >
-                      {exporting === p.id ? '导出中...' : '导出数据集'}
-                    </button>
-                    <button
-                      onClick={() => setImportDialogProject(p)}
-                      disabled={importing === p.id}
-                      style={{ padding: '6px 10px', backgroundColor: '#1890ff', color: 'white', border: '1px solid #1890ff', borderRadius: 6, cursor: importing === p.id ? 'not-allowed' : 'pointer' }}
-                    >
-                      {importing === p.id ? '导入中...' : '导入数据'}
-                    </button>
-                    <button onClick={() => onDeleteProject(p.id)} style={{ padding: '6px 10px', color: '#ff4d4f', borderColor: '#ff4d4f' }}>
-                      {deleting === p.id ? '删除中...' : '删除项目'}
-                    </button>
-                    <button
-                      onClick={() => onGenerateThumbnails(p.id)}
-                      disabled={generatingThumbnails === p.id}
-                      style={{ padding: '6px 10px', backgroundColor: '#722ed1', color: 'white', border: '1px solid #722ed1', borderRadius: 6, cursor: generatingThumbnails === p.id ? 'not-allowed' : 'pointer' }}
-                    >
-                      {generatingThumbnails === p.id ? '生成中...' : '生成缩略图'}
-                    </button>
-                  </div>
-                </div>
-                {/* 导入进度条 */}
-                {importProgress && importProgress.projectId === p.id && (
-                  <div style={{ marginTop: 8, padding: 12, backgroundColor: '#e6f7ff', borderRadius: 4, border: '1px solid #91d5ff' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                      <span style={{ fontWeight: 500, color: '#1890ff' }}>
-                        {importProgress.status === 'succeeded' ? '导入完成' :
-                         importProgress.status === 'failed' ? '导入失败' : '正在导入...'}
-                      </span>
-                      <span style={{ color: '#666', fontSize: 13 }}>
-                        {importProgress.current} / {importProgress.total} ({importProgress.progress}%)
-                      </span>
-                    </div>
-                    {/* 进度条 */}
-                    <div style={{ width: '100%', height: 8, backgroundColor: '#d9d9d9', borderRadius: 4, overflow: 'hidden' }}>
-                      <div
-                        style={{
-                          width: `${importProgress.progress}%`,
-                          height: '100%',
-                          backgroundColor: importProgress.status === 'failed' ? '#ff4d4f' :
-                                          importProgress.status === 'succeeded' ? '#52c41a' : '#1890ff',
-                          transition: 'width 0.3s ease',
-                          borderRadius: 4,
-                        }}
-                      />
-                    </div>
-                    <div style={{ marginTop: 6, fontSize: 12, color: '#666' }}>
-                      {importProgress.message}
-                    </div>
-                    {importProgress.status === 'succeeded' && (
-                      <div style={{ marginTop: 6, fontSize: 12, color: '#52c41a' }}>
-                        新增 {importProgress.imported}，重复 {importProgress.duplicates}，错误 {importProgress.errors}
-                        {importProgress.annotations_imported !== undefined && (
-                          <span>，标注导入 {importProgress.annotations_imported}</span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-                {importResult[p.id] && !importProgress && (
-                  <div style={{ marginTop: 8, fontSize: 14, backgroundColor: '#f6ffed', padding: 8, borderRadius: 4 }}>
-                    导入结果：总数 {importResult[p.id].total}，新增 {importResult[p.id].imported}，
-                    重复 {importResult[p.id].duplicates}，错误 {importResult[p.id].errors}
-                    {importResult[p.id].annotations_imported !== undefined && (
-                      <span>，标注导入 {importResult[p.id].annotations_imported}，标注跳过 {importResult[p.id].annotations_skipped}</span>
-                    )}
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      {/* 导出对话框 */}
-      {exportDialogProject && (
-        <ExportDialog
-          projectId={exportDialogProject.id}
-          projectName={exportDialogProject.name}
-          onClose={() => setExportDialogProject(null)}
-          onExportStart={() => setExporting(exportDialogProject.id)}
-          onExportEnd={(success, message) => {
-            setExporting(null)
-            alert(message)
+    <ConfigProvider theme={{ token: { colorPrimary: '#1677ff', borderRadius: 8 } }}>
+      <Layout style={{ minHeight: '100vh', background: '#f5f5f5' }}>
+        {/* 顶部导航 */}
+        <Header
+          style={{
+            background: '#fff',
+            borderBottom: '1px solid #f0f0f0',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '0 24px',
+            position: 'sticky',
+            top: 0,
+            zIndex: 100,
           }}
-        />
-      )}
-
-      {/* 导入对话框 */}
-      {importDialogProject && (
-        <ImportDialog
-          projectId={importDialogProject.id}
-          projectName={importDialogProject.name}
-          onClose={() => setImportDialogProject(null)}
-          onImport={(files, format) => onImport(importDialogProject.id, files, format)}
-        />
-      )}
-
-      {/* 编辑项目对话框 */}
-      {editProject && (
-        <EditProjectDialog
-          project={editProject}
-          onClose={() => setEditProject(null)}
-          onSaved={(updated) => {
-            setEditProject(null)
-            setProjects(prev => prev.map(p => p.id === updated.id ? updated : p))
-          }}
-        />
-      )}
-    </div>
-  )
-}
-
-// 编辑项目对话框组件
-const EditProjectDialog: React.FC<{
-  project: Project
-  onClose: () => void
-  onSaved: (updated: Project) => void
-}> = ({ project, onClose, onSaved }) => {
-  const [name, setName] = useState(project.name)
-  const [description, setDescription] = useState(project.description || '')
-  const [classes, setClasses] = useState<{ id: number; name: string; color?: string }[]>([])
-  const [newClassName, setNewClassName] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [addingClass, setAddingClass] = useState(false)
-
-  useEffect(() => {
-    fetch(`/api/projects/${project.id}/classes`)
-      .then(r => r.json())
-      .then(setClasses)
-      .catch(() => setClasses([]))
-  }, [project.id])
-
-  const onSave = async () => {
-    if (!name.trim()) { alert('项目名称不能为空'); return }
-    setSaving(true)
-    try {
-      const res = await fetch(`/api/projects/${project.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), description }),
-      })
-      if (!res.ok) throw new Error('保存失败')
-      const updated = await res.json()
-      onSaved(updated)
-    } catch (e) {
-      console.error(e)
-      alert('保存失败')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const onAddClass = async () => {
-    if (!newClassName.trim()) return
-    setAddingClass(true)
-    try {
-      const res = await fetch(`/api/projects/${project.id}/classes`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newClassName.trim() }),
-      })
-      if (!res.ok) throw new Error('添加类别失败')
-      const cls = await res.json()
-      setClasses(prev => [...prev, cls])
-      setNewClassName('')
-    } catch (e) {
-      console.error(e)
-      alert('添加类别失败')
-    } finally {
-      setAddingClass(false)
-    }
-  }
-
-  return (
-    <div style={{
-      position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex',
-      alignItems: 'center', justifyContent: 'center', zIndex: 1000
-    }}>
-      <div style={{
-        backgroundColor: 'white', borderRadius: 8, padding: 24,
-        width: 480, boxShadow: '0 4px 12px rgba(0,0,0,0.15)', maxHeight: '80vh',
-        display: 'flex', flexDirection: 'column'
-      }}>
-        <h3 style={{ marginTop: 0, marginBottom: 16 }}>编辑项目</h3>
-
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ display: 'block', fontWeight: 500, marginBottom: 4 }}>项目名称</label>
-          <input
-            value={name}
-            onChange={e => setName(e.target.value)}
-            style={{ width: '100%', padding: 8, boxSizing: 'border-box', border: '1px solid #d9d9d9', borderRadius: 4 }}
-          />
-        </div>
-
-        <div style={{ marginBottom: 16 }}>
-          <label style={{ display: 'block', fontWeight: 500, marginBottom: 4 }}>项目描述</label>
-          <textarea
-            value={description}
-            onChange={e => setDescription(e.target.value)}
-            rows={2}
-            style={{ width: '100%', padding: 8, boxSizing: 'border-box', border: '1px solid #d9d9d9', borderRadius: 4, resize: 'vertical' }}
-          />
-        </div>
-
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontWeight: 500, marginBottom: 8 }}>类别列表（只可添加，不可删除）</div>
-          <div style={{ maxHeight: 160, overflowY: 'auto', border: '1px solid #f0f0f0', borderRadius: 4, padding: 8 }}>
-            {classes.length === 0 ? (
-              <div style={{ color: '#999', fontSize: 13 }}>暂无类别</div>
-            ) : (
-              classes.map((cls, i) => (
-                <div key={cls.id} style={{
-                  display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0',
-                  borderBottom: i < classes.length - 1 ? '1px solid #f0f0f0' : 'none'
-                }}>
-                  {cls.color && (
-                    <span style={{
-                      display: 'inline-block', width: 12, height: 12,
-                      borderRadius: 2, backgroundColor: cls.color, flexShrink: 0
-                    }} />
-                  )}
-                  <span style={{ fontSize: 14 }}>{cls.name}</span>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-          <input
-            placeholder="新类别名称"
-            value={newClassName}
-            onChange={e => setNewClassName(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') onAddClass() }}
-            style={{ flex: 1, padding: 8, border: '1px solid #d9d9d9', borderRadius: 4 }}
-          />
-          <button
-            onClick={onAddClass}
-            disabled={addingClass || !newClassName.trim()}
-            style={{
-              padding: '8px 14px', backgroundColor: '#1890ff', color: 'white',
-              border: 'none', borderRadius: 4,
-              cursor: addingClass || !newClassName.trim() ? 'not-allowed' : 'pointer',
-              opacity: addingClass || !newClassName.trim() ? 0.6 : 1
-            }}
+        >
+          <Space align="center" size={12}>
+            <FolderOutlined style={{ fontSize: 22, color: '#1677ff' }} />
+            <Title level={4} style={{ margin: 0, color: '#262626' }}>
+              标注与训练平台
+            </Title>
+            <Badge
+              status={health === 'ok' ? 'success' : health === 'error' ? 'error' : 'default'}
+              text={
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {health === 'ok' ? '服务正常' : health === 'error' ? '服务异常' : '检测中'}
+                </Text>
+              }
+            />
+          </Space>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => setCreateOpen(true)}
           >
-            {addingClass ? '添加中...' : '添加类别'}
-          </button>
-        </div>
+            新建项目
+          </Button>
+        </Header>
 
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 'auto' }}>
-          <button
-            onClick={onClose}
-            style={{ padding: '8px 16px', border: '1px solid #d9d9d9', borderRadius: 4, backgroundColor: 'white', cursor: 'pointer' }}
-          >
-            取消
-          </button>
-          <button
-            onClick={onSave}
-            disabled={saving}
-            style={{
-              padding: '8px 16px', border: 'none', borderRadius: 4,
-              backgroundColor: '#fa8c16', color: 'white',
-              cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.7 : 1
-            }}
-          >
-            {saving ? '保存中...' : '保存'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
+        {/* 内容区 */}
+        <Content style={{ padding: '24px', maxWidth: 1200, margin: '0 auto', width: '100%' }}>
+          {projects.length === 0 && !loading ? (
+            <Card style={{ textAlign: 'center', padding: '48px 0' }}>
+              <Empty
+                description="暂无项目，点击右上角新建项目开始"
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+              >
+                <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+                  新建第一个项目
+                </Button>
+              </Empty>
+            </Card>
+          ) : (
+            <Row gutter={[16, 16]}>
+              {projects.map((p) => (
+                <Col key={p.id} xs={24} sm={12} lg={8}>
+                  <Card
+                    hoverable
+                    style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+                    bodyStyle={{ flex: 1, display: 'flex', flexDirection: 'column' }}
+                    actions={[
+                      <Button
+                        key="open"
+                        type="primary"
+                        icon={<ArrowRightOutlined />}
+                        block
+                        style={{ margin: '0 12px', width: 'calc(100% - 24px)' }}
+                        onClick={() => setCurrentProject(p)}
+                      >
+                        进入项目
+                      </Button>,
+                    ]}
+                  >
+                    {/* 项目标题 */}
+                    <div style={{ marginBottom: 12 }}>
+                      <Text strong style={{ fontSize: 16 }}>{p.name}</Text>
+                      {p.description && (
+                        <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 2 }}>
+                          {p.description}
+                        </Text>
+                      )}
+                    </div>
 
-// 导入对话框组件
-const ImportDialog: React.FC<{
-  projectId: number
-  projectName: string
-  onClose: () => void
-  onImport: (files: File[], format: 'images' | 'yolo' | 'coco' | 'single' | 'folder' | 'video') => void
-}> = ({ projectId, projectName, onClose, onImport }) => {
-  const [format, setFormat] = useState<'images' | 'yolo' | 'coco' | 'single' | 'folder' | 'video'>('folder')
-  const fileInputRef = React.useRef<HTMLInputElement>(null)
-  const folderInputRef = React.useRef<HTMLInputElement>(null)
-  const videoInputRef = React.useRef<HTMLInputElement>(null)
+                    {/* 类别标签 */}
+                    <div style={{ marginBottom: 12, flex: 1 }}>
+                      {p.classes.length > 0 ? (
+                        <Space wrap size={4}>
+                          {p.classes.slice(0, 6).map((c, i) => (
+                            <Tag key={c.id} color={getTagColor(i)} style={{ margin: 0 }}>
+                              {c.name}
+                            </Tag>
+                          ))}
+                          {p.classes.length > 6 && (
+                            <Tag color="default">+{p.classes.length - 6}</Tag>
+                          )}
+                        </Space>
+                      ) : (
+                        <Text type="secondary" style={{ fontSize: 12 }}>暂无类别</Text>
+                      )}
+                    </div>
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (files && files.length > 0) {
-      onImport(Array.from(files), format)
-    }
-  }
+                    {/* 图片数量 + 删除 */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
+                      <Space size={4}>
+                        <PictureOutlined style={{ color: '#8c8c8c' }} />
+                        <Text type="secondary" style={{ fontSize: 13 }}>
+                          {p.imageCount} 张图片
+                        </Text>
+                      </Space>
+                      <Popconfirm
+                        title="删除项目"
+                        description="将同时删除所有图片和标注，此操作不可恢复！"
+                        onConfirm={() => handleDelete(p.id)}
+                        okText="确认删除"
+                        cancelText="取消"
+                        okButtonProps={{ danger: true }}
+                      >
+                        <Tooltip title="删除项目">
+                          <Button
+                            type="text"
+                            danger
+                            icon={<DeleteOutlined />}
+                            size="small"
+                          />
+                        </Tooltip>
+                      </Popconfirm>
+                    </div>
+                  </Card>
+                </Col>
+              ))}
+            </Row>
+          )}
+        </Content>
 
-  const handleButtonClick = () => {
-    if (format === 'folder') {
-      folderInputRef.current?.click()
-    } else if (format === 'video') {
-      videoInputRef.current?.click()
-    } else {
-      fileInputRef.current?.click()
-    }
-  }
-
-  const getAcceptTypes = () => {
-    if (format === 'single' || format === 'folder') return '.jpg,.jpeg,.png'
-    if (format === 'video') return '.mp4,.avi,.mov,.mkv,.wmv,.flv'
-    return '.zip'
-  }
-
-  const getButtonText = () => {
-    switch (format) {
-      case 'single': return '选择图片'
-      case 'folder': return '选择文件夹'
-      case 'video': return '选择视频文件'
-      default: return '选择ZIP文件'
-    }
-  }
-
-  return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 1000
-    }}>
-      <div style={{
-        backgroundColor: 'white',
-        borderRadius: 8,
-        padding: 24,
-        width: 450,
-        boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
-      }}>
-        <h3 style={{ marginTop: 0, marginBottom: 16 }}>导入数据 - {projectName}</h3>
-
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>选择导入格式</div>
-
-          <label style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 8,
-            padding: 12,
-            border: format === 'folder' ? '2px solid #1890ff' : '1px solid #d9d9d9',
-            borderRadius: 6,
-            cursor: 'pointer',
-            marginBottom: 8,
-            backgroundColor: format === 'folder' ? '#e6f7ff' : 'white'
-          }}>
-            <input
-              type="radio"
-              name="format"
-              checked={format === 'folder'}
-              onChange={() => setFormat('folder')}
-              style={{ marginTop: 2 }}
-            />
-            <div>
-              <div style={{ fontWeight: 500 }}>选择文件夹</div>
-              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
-                选择包含 JPG/PNG 图片的文件夹，批量导入所有图片。
-              </div>
-            </div>
-          </label>
-
-          <label style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 8,
-            padding: 12,
-            border: format === 'single' ? '2px solid #1890ff' : '1px solid #d9d9d9',
-            borderRadius: 6,
-            cursor: 'pointer',
-            marginBottom: 8,
-            backgroundColor: format === 'single' ? '#e6f7ff' : 'white'
-          }}>
-            <input
-              type="radio"
-              name="format"
-              checked={format === 'single'}
-              onChange={() => setFormat('single')}
-              style={{ marginTop: 2 }}
-            />
-            <div>
-              <div style={{ fontWeight: 500 }}>单张图片</div>
-              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
-                上传单张 JPG/PNG 图片，导入后需要手动标注。
-              </div>
-            </div>
-          </label>
-
-          <label style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 8,
-            padding: 12,
-            border: format === 'yolo' ? '2px solid #1890ff' : '1px solid #d9d9d9',
-            borderRadius: 6,
-            cursor: 'pointer',
-            marginBottom: 8,
-            backgroundColor: format === 'yolo' ? '#e6f7ff' : 'white'
-          }}>
-            <input
-              type="radio"
-              name="format"
-              checked={format === 'yolo'}
-              onChange={() => setFormat('yolo')}
-              style={{ marginTop: 2 }}
-            />
-            <div>
-              <div style={{ fontWeight: 500 }}>YOLO格式数据集</div>
-              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
-                包含 train/valid/test 文件夹、images 和 labels 子目录、data.yaml 类别定义。
-                将自动导入图片和标注，类别按名称匹配。
-              </div>
-            </div>
-          </label>
-
-          <label style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 8,
-            padding: 12,
-            border: format === 'coco' ? '2px solid #1890ff' : '1px solid #d9d9d9',
-            borderRadius: 6,
-            cursor: 'pointer',
-            marginBottom: 8,
-            backgroundColor: format === 'coco' ? '#e6f7ff' : 'white'
-          }}>
-            <input
-              type="radio"
-              name="format"
-              checked={format === 'coco'}
-              onChange={() => setFormat('coco')}
-              style={{ marginTop: 2 }}
-            />
-            <div>
-              <div style={{ fontWeight: 500 }}>COCO格式数据集</div>
-              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
-                包含 train/valid/test 文件夹和 _annotations.coco.json 文件。
-                将自动导入图片和标注，类别自动创建或匹配。
-              </div>
-            </div>
-          </label>
-
-          <label style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 8,
-            padding: 12,
-            border: format === 'images' ? '2px solid #1890ff' : '1px solid #d9d9d9',
-            borderRadius: 6,
-            cursor: 'pointer',
-            marginBottom: 8,
-            backgroundColor: format === 'images' ? '#e6f7ff' : 'white'
-          }}>
-            <input
-              type="radio"
-              name="format"
-              checked={format === 'images'}
-              onChange={() => setFormat('images')}
-              style={{ marginTop: 2 }}
-            />
-            <div>
-              <div style={{ fontWeight: 500 }}>纯图片ZIP</div>
-              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
-                仅包含图片文件的ZIP压缩包，不包含标注。
-                导入后需要手动标注。
-              </div>
-            </div>
-          </label>
-
-          <label style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 8,
-            padding: 12,
-            border: format === 'video' ? '2px solid #1890ff' : '1px solid #d9d9d9',
-            borderRadius: 6,
-            cursor: 'pointer',
-            backgroundColor: format === 'video' ? '#e6f7ff' : 'white'
-          }}>
-            <input
-              type="radio"
-              name="format"
-              checked={format === 'video'}
-              onChange={() => setFormat('video')}
-              style={{ marginTop: 2 }}
-            />
-            <div>
-              <div style={{ fontWeight: 500 }}>视频文件（自动抽帧）</div>
-              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
-                上传 mp4/avi/mov/mkv 等视频，后台自动按 1fps 抽取帧图片。
-                适合快速从视频中批量采集数据。
-              </div>
-            </div>
-          </label>
-        </div>
-
-        {/* 普通文件选择 */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept={getAcceptTypes()}
-          style={{ display: 'none' }}
-          onChange={handleFileSelect}
-        />
-
-        {/* 文件夹选择 */}
-        <input
-          ref={folderInputRef}
-          type="file"
-          accept=".jpg,.jpeg,.png"
-          multiple
-          {...{ webkitdirectory: '', directory: '' } as any}
-          style={{ display: 'none' }}
-          onChange={handleFileSelect}
-        />
-
-        {/* 视频文件选择 */}
-        <input
-          ref={videoInputRef}
-          type="file"
-          accept=".mp4,.avi,.mov,.mkv,.wmv,.flv"
-          style={{ display: 'none' }}
-          onChange={handleFileSelect}
-        />
-
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <button
-            onClick={onClose}
-            style={{
-              padding: '8px 16px',
-              border: '1px solid #d9d9d9',
-              borderRadius: 4,
-              backgroundColor: 'white',
-              cursor: 'pointer'
-            }}
-          >
-            取消
-          </button>
-          <button
-            onClick={handleButtonClick}
-            style={{
-              padding: '8px 16px',
-              border: 'none',
-              borderRadius: 4,
-              backgroundColor: '#1890ff',
-              color: 'white',
-              cursor: 'pointer'
-            }}
-          >
-            {getButtonText()}
-          </button>
-        </div>
-      </div>
-    </div>
+        {/* 新建项目 Modal */}
+        <Modal
+          title="新建项目"
+          open={createOpen}
+          onOk={handleCreate}
+          onCancel={() => { setCreateOpen(false); form.resetFields() }}
+          confirmLoading={creating}
+          okText="创建"
+          cancelText="取消"
+          width={480}
+        >
+          <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
+            <Form.Item
+              name="name"
+              label="项目名称"
+              rules={[{ required: true, message: '请输入项目名称' }]}
+            >
+              <Input placeholder="例如：车牌检测项目" autoFocus />
+            </Form.Item>
+            <Form.Item
+              name="classes"
+              label="检测类别（可选）"
+              extra="多个类别请用英文逗号分隔，例如：cat, dog, person"
+            >
+              <Input placeholder="cat, dog, person" />
+            </Form.Item>
+          </Form>
+        </Modal>
+      </Layout>
+    </ConfigProvider>
   )
 }

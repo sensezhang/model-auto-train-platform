@@ -362,3 +362,63 @@ def run_batch_inference(
             })
 
     return {'results': results}
+
+
+# ──────────────────────────────────────────────
+# SAM3 分割推理
+# ──────────────────────────────────────────────
+
+class SAM3Request(BaseModel):
+    image_data: str            # base64 编码图片（支持 data:image/...;base64,xxx 和纯 base64）
+    text_labels: List[str] = []  # ["car","person"]；空列表则分割所有对象
+    conf: float = 0.4
+    iou: float = 0.9
+    imgsz: int = 512           # 推理图像尺寸，越小越快，GPU 下 512 通常 2-5s
+
+
+@router.post("/sam3")
+def sam3_inference(body: SAM3Request):
+    """
+    调用远程 SAM3 API 对单张图片进行分割推理。
+    返回分割结果多边形列表（原图坐标系），前端负责叠加渲染。
+    """
+    import tempfile
+    import requests as _requests
+    from ..services.sam3_service import run_sam3, SAM3_API_URL
+
+    # base64 解码 → 临时文件
+    raw = body.image_data
+    if "," in raw:
+        raw = raw.split(",", 1)[1]
+    try:
+        img_bytes = base64.b64decode(raw)
+    except Exception as e:
+        raise HTTPException(400, f"图片 base64 解码失败: {e}")
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as f:
+            f.write(img_bytes)
+            tmp_path = f.name
+
+        result = run_sam3(
+            tmp_path,
+            body.text_labels,
+            conf=body.conf,
+            iou=body.iou,
+            imgsz=body.imgsz,
+        )
+    except _requests.exceptions.ConnectionError:
+        raise HTTPException(503, f"无法连接 SAM3 API（{SAM3_API_URL}），请确认服务已启动")
+    except _requests.exceptions.Timeout:
+        raise HTTPException(504, "SAM3 API 请求超时")
+    except _requests.exceptions.HTTPError as e:
+        raise HTTPException(502, f"SAM3 API 返回错误: {e}")
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    return result

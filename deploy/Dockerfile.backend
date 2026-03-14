@@ -1,6 +1,6 @@
 # 后端 Dockerfile - 支持 GPU 训练（YOLO + RF-DETR）
 # 使用 PyTorch 2.5.1 + CUDA 12.4，兼容 CUDA 12.x / 13.x 驱动
-FROM hub.ikingtec.com/ai/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
 

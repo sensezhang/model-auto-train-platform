@@ -48,6 +48,7 @@ export const getClassColor = (classId: number, customColors?: Record<number, str
 export const CanvasBBox: React.FC<Props> = ({ imageUrl, naturalWidth, naturalHeight, boxes, selectedId, onSelect, onCreate, onDelete, onUpdate, onSelectClassId, classColors }) => {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement | null>(null)
+  const imageContainerRef = useRef<HTMLDivElement | null>(null)  // 内层图片容器，用于精确坐标计算
   const [baseSize, setBaseSize] = useState<{ w: number; h: number }>({ w: naturalWidth, h: naturalHeight })
   const [zoomIndex, setZoomIndex] = useState(0)
   const [hoverId, setHoverId] = useState<number | null>(null)
@@ -60,14 +61,32 @@ export const CanvasBBox: React.FC<Props> = ({ imageUrl, naturalWidth, naturalHei
   }), [baseSize, zoomLevel])
 
   useEffect(() => {
-    const updateSize = () => {
-      const maxW = containerRef.current?.clientWidth || naturalWidth
-      const baseScale = Math.min(1, maxW / naturalWidth)
-      setBaseSize({ w: Math.round(naturalWidth * baseScale), h: Math.round(naturalHeight * baseScale) })
+    // 同时约束宽度和高度，确保图片完整显示在 scrollContainer 内
+    const compute = () => {
+      const scrollEl = scrollContainerRef.current
+      if (!scrollEl) return
+      const maxW = scrollEl.clientWidth
+      const maxH = scrollEl.clientHeight
+      if (!maxW || !maxH) return
+      // 等比缩放，不允许放大超过原始尺寸（scale ≤ 1 when image larger than container）
+      const baseScale = Math.min(1, maxW / naturalWidth, maxH / naturalHeight)
+      setBaseSize({
+        w: Math.round(naturalWidth  * baseScale),
+        h: Math.round(naturalHeight * baseScale),
+      })
     }
-    updateSize()
-    window.addEventListener('resize', updateSize)
-    return () => window.removeEventListener('resize', updateSize)
+
+    compute()
+
+    // ResizeObserver：响应容器尺寸变化（行高调整、窗口大小变化等）
+    const ro = new ResizeObserver(compute)
+    if (scrollContainerRef.current) ro.observe(scrollContainerRef.current)
+    window.addEventListener('resize', compute)
+
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', compute)
+    }
   }, [naturalWidth, naturalHeight])
 
   // 重置缩放当图片改变时
@@ -78,13 +97,12 @@ export const CanvasBBox: React.FC<Props> = ({ imageUrl, naturalWidth, naturalHei
   const scale = useMemo(() => ({ x: renderSize.w / naturalWidth, y: renderSize.h / naturalHeight }), [renderSize, naturalWidth, naturalHeight])
 
   const toLocal = (clientX: number, clientY: number) => {
-    const scrollEl = scrollContainerRef.current
-    const el = containerRef.current!
+    // 直接用内层图片容器的 getBoundingClientRect
+    // getBoundingClientRect 已包含滚动偏移，不需要再加 scrollLeft/scrollTop
+    const el = imageContainerRef.current!
     const rect = el.getBoundingClientRect()
-    const scrollX = scrollEl?.scrollLeft || 0
-    const scrollY = scrollEl?.scrollTop || 0
-    const lx = clientX - rect.left + scrollX
-    const ly = clientY - rect.top + scrollY
+    const lx = clientX - rect.left
+    const ly = clientY - rect.top
     return {
       x: Math.max(0, Math.min(renderSize.w, lx)),
       y: Math.max(0, Math.min(renderSize.h, ly)),
@@ -120,10 +138,10 @@ export const CanvasBBox: React.FC<Props> = ({ imageUrl, naturalWidth, naturalHei
     const scrollEl = scrollContainerRef.current
     if (!scrollEl) return
 
-    // 获取双击位置相对于图片的比例
-    const rect = containerRef.current!.getBoundingClientRect()
-    const clickX = e.clientX - rect.left + scrollEl.scrollLeft
-    const clickY = e.clientY - rect.top + scrollEl.scrollTop
+    // 获取双击位置相对于图片的比例（直接用内层容器，已含滚动偏移）
+    const rect = imageContainerRef.current!.getBoundingClientRect()
+    const clickX = e.clientX - rect.left
+    const clickY = e.clientY - rect.top
     const ratioX = clickX / renderSize.w
     const ratioY = clickY / renderSize.h
 
@@ -304,26 +322,28 @@ export const CanvasBBox: React.FC<Props> = ({ imageUrl, naturalWidth, naturalHei
           top: 8,
           right: 8,
           zIndex: 10,
-          backgroundColor: 'rgba(0,0,0,0.6)',
-          color: 'white',
-          padding: '4px 8px',
-          borderRadius: 4,
+          backgroundColor: 'rgba(255,255,255,0.92)',
+          color: '#333',
+          padding: '4px 10px',
+          borderRadius: 6,
           fontSize: 12,
           display: 'flex',
           alignItems: 'center',
-          gap: 8
+          gap: 8,
+          boxShadow: '0 1px 6px rgba(0,0,0,0.12)',
+          border: '1px solid #e0e0e0',
         }}>
-          <span>{Math.round(zoomLevel * 100)}%</span>
+          <span style={{ fontWeight: 500 }}>{Math.round(zoomLevel * 100)}%</span>
           <button
             onClick={() => setZoomIndex(0)}
             style={{
-              background: 'transparent',
-              border: '1px solid white',
-              color: 'white',
-              padding: '2px 6px',
-              borderRadius: 3,
+              background: '#f5f5f5',
+              border: '1px solid #d9d9d9',
+              color: '#555',
+              padding: '2px 8px',
+              borderRadius: 4,
               cursor: 'pointer',
-              fontSize: 11
+              fontSize: 11,
             }}
           >
             重置
@@ -331,22 +351,30 @@ export const CanvasBBox: React.FC<Props> = ({ imageUrl, naturalWidth, naturalHei
         </div>
       )}
 
-      {/* 可滚动容器 */}
+      {/* 可滚动容器：居中展示图片，放大时可滚动 */}
       <div
         ref={scrollContainerRef}
         style={{
           flex: 1,
           overflow: zoomLevel > 1 ? 'auto' : 'hidden',
-          position: 'relative'
+          position: 'relative',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: '#f7f8fa',
         }}
       >
         <div
+          ref={imageContainerRef}
           style={{
             position: 'relative',
             width: renderSize.w,
             height: renderSize.h,
             userSelect: 'none',
-            cursor: getCursor()
+            cursor: getCursor(),
+            flexShrink: 0,
+            /* 图片轻阴影，与棋盘格背景形成清晰层次 */
+            boxShadow: '0 2px 16px rgba(0,0,0,0.18)',
           }}
           onMouseDown={onSurfaceDown}
           onMouseMove={onSurfaceMove}
@@ -360,8 +388,11 @@ export const CanvasBBox: React.FC<Props> = ({ imageUrl, naturalWidth, naturalHei
       </div>
 
       {/* 操作提示 */}
-      <div style={{ fontSize: 11, color: '#999', padding: '4px 0', textAlign: 'center' }}>
-        双击放大/缩小 | {zoomLevel > 1 ? 'Alt+拖动平移 | ' : ''}当前 {Math.round(zoomLevel * 100)}%
+      <div style={{
+        fontSize: 11, color: '#888', padding: '3px 0', textAlign: 'center',
+        background: '#fafafa', borderTop: '1px solid #ececec', flexShrink: 0,
+      }}>
+        双击放大 / 缩小 &nbsp;·&nbsp; {zoomLevel > 1 ? 'Alt + 拖动平移 &nbsp;·&nbsp; ' : ''}当前 {Math.round(zoomLevel * 100)}%
       </div>
     </div>
   )

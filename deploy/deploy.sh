@@ -4,13 +4,12 @@
 # YOLO/RF-DETR 训练标注平台 - 一键部署脚本
 # ============================================
 # 使用方法:
-#   ./deploy.sh start       # 启动服务（自动检测GPU）
-#   ./deploy.sh start-gpu   # 强制使用GPU模式
-#   ./deploy.sh start-cpu   # 强制使用CPU模式
+#   ./deploy.sh start       # 启动服务（GPU 模式）
 #   ./deploy.sh stop        # 停止服务
 #   ./deploy.sh restart     # 重启服务
 #   ./deploy.sh logs        # 查看日志
 #   ./deploy.sh update      # 更新并重启
+#   ./deploy.sh upgrade     # 从压缩包更新代码（保留数据）
 #   ./deploy.sh status      # 查看状态
 #   ./deploy.sh clean       # 清理（保留数据）
 #   ./deploy.sh clean-all   # 完全清理（删除数据）
@@ -96,8 +95,8 @@ check_gpu() {
         fi
     fi
 
-    log_warn "未检测到 NVIDIA GPU，将使用 CPU 模式"
-    return 1
+    log_error "未检测到 NVIDIA GPU 或 NVIDIA Container Toolkit 未就绪，无法启动"
+    exit 1
 }
 
 # 初始化目录
@@ -142,20 +141,10 @@ start_gpu() {
     show_access_info
 }
 
-# 启动服务（CPU 模式）
-start_cpu() {
-    log_step "启动服务（CPU 模式）..."
-    docker compose -f docker-compose.cpu.yml up -d --build
-    show_access_info
-}
-
 # 自动检测并启动
 start_auto() {
-    if check_gpu; then
-        start_gpu
-    else
-        start_cpu
-    fi
+    check_gpu
+    start_gpu
 }
 
 # 显示访问信息
@@ -179,20 +168,19 @@ show_access_info() {
 stop() {
     log_step "停止服务..."
     docker compose -f docker-compose.yml down 2>/dev/null || true
-    docker compose -f docker-compose.cpu.yml down 2>/dev/null || true
     log_info "服务已停止"
 }
 
 # 重启服务
 restart() {
     log_step "重启服务..."
-    docker compose restart 2>/dev/null || docker compose -f docker-compose.cpu.yml restart 2>/dev/null
+    docker compose -f docker-compose.yml restart
     log_info "服务已重启"
 }
 
 # 查看日志
 logs() {
-    docker compose logs -f 2>/dev/null || docker compose -f docker-compose.cpu.yml logs -f
+    docker compose -f docker-compose.yml logs -f
 }
 
 # 查看后端日志
@@ -213,11 +201,8 @@ update() {
     fi
 
     # 重新构建并启动
-    if check_gpu; then
-        docker compose -f docker-compose.yml up -d --build
-    else
-        docker compose -f docker-compose.cpu.yml up -d --build
-    fi
+    check_gpu
+    docker compose -f docker-compose.yml up -d --build
 
     log_info "更新完成"
 }
@@ -291,7 +276,7 @@ upgrade() {
 status() {
     echo ""
     echo "=== 容器状态 ==="
-    docker compose ps 2>/dev/null || docker compose -f docker-compose.cpu.yml ps 2>/dev/null
+    docker compose -f docker-compose.yml ps 2>/dev/null
 
     echo ""
     echo "=== GPU 状态 ==="
@@ -312,7 +297,6 @@ clean() {
     log_step "清理 Docker 资源（保留数据）..."
     stop
     docker compose -f docker-compose.yml down --rmi local 2>/dev/null || true
-    docker compose -f docker-compose.cpu.yml down --rmi local 2>/dev/null || true
     docker system prune -f
     log_info "清理完成，数据已保留在: $DATA_DIR"
 }
@@ -370,9 +354,7 @@ help() {
     echo "使用方法: ./deploy.sh <命令>"
     echo ""
     echo "命令:"
-    echo "  start        自动检测GPU并启动服务"
-    echo "  start-gpu    强制使用 GPU 模式启动"
-    echo "  start-cpu    强制使用 CPU 模式启动"
+    echo "  start        启动服务（GPU 模式）"
     echo "  stop         停止服务"
     echo "  restart      重启服务"
     echo "  update       更新并重启服务（git pull）"
@@ -395,16 +377,6 @@ main() {
             check_docker
             init
             start_auto
-            ;;
-        start-gpu)
-            check_docker
-            init
-            start_gpu
-            ;;
-        start-cpu)
-            check_docker
-            init
-            start_cpu
             ;;
         stop)
             stop

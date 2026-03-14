@@ -460,7 +460,7 @@ def start_training_async(job_id: int):
     import subprocess
     import sys
 
-    from ..db import DB_PATH, get_session
+    from ..db import DB_TYPE, DB_PATH, APP_DB_URL, get_session
     from ..models import TrainingJob
 
     # 获取 GPU 配置
@@ -509,7 +509,10 @@ if __name__ == '__main__':
         creationflags = subprocess.CREATE_NO_WINDOW
 
     env = os.environ.copy()
-    env['APP_DB_PATH'] = str(DB_PATH)
+    if DB_TYPE == "mysql":
+        env['APP_DB_URL'] = APP_DB_URL
+    else:
+        env['APP_DB_PATH'] = str(DB_PATH)
 
     # 在进程启动时就设置 GPU（必须在导入 torch 之前生效）
     if gpu_ids_str:
@@ -517,7 +520,8 @@ if __name__ == '__main__':
 
     log_f = open(process_log, 'w', encoding='utf-8', buffering=1)
     log_f.write(f"Starting RF-DETR training job {job_id} at {datetime.now()}\n")
-    log_f.write(f"Database: sqlite:///{DB_PATH}\n")
+    db_info = APP_DB_URL if DB_TYPE == "mysql" else f"sqlite:///{DB_PATH}"
+    log_f.write(f"Database: {db_info}\n")
     log_f.write(f"Working directory: {backend_dir}\n")
     log_f.flush()
 
